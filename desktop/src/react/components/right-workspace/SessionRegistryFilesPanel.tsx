@@ -3,12 +3,18 @@ import type React from 'react';
 import { useStore } from '../../stores';
 import { selectSessionFiles } from '../../stores/selectors/file-refs';
 import type { FileRef } from '../../types/file-ref';
-import type { ContextMenuItem } from '../ContextMenu';
-import { ContextMenu } from '../ContextMenu';
-import { openFilePreview } from '../../utils/file-preview';
-import { extOfName, isMediaKind } from '../../utils/file-kind';
-import { openMediaViewerForRef } from '../../utils/open-media-viewer';
+import { ContextMenu, type ContextMenuItem } from '../../ui';
+import { isMarkdownFileName } from '../../utils/file-kind';
+import { fileRefDownloadUrl, openFileRefPreview } from '../../utils/remote-file-preview';
+import {
+  canPreviewFileRef,
+  canUseFileRefNativePath,
+  resolveFileRefNativePath,
+} from '../../services/resource-access';
+import { resolveServerConnection } from '../../services/server-connection';
+import { takeMarkdownFileScreenshot } from '../../utils/screenshot';
 import { hanaFetch } from '../../hooks/use-hana-fetch';
+import { FileKindIcon } from '../shared/FileKindIcon';
 import {
   clearAppFileDragPayload,
   writeAppFileDragPayload,
@@ -21,7 +27,7 @@ const RUBBER_BAND_MIN = 4;
 
 type SessionFileSortMode = 'time-desc' | 'name-asc' | 'name-desc' | 'type-asc';
 
-type BridgePlatform = 'feishu' | 'telegram' | 'whatsapp' | 'qq' | 'wechat';
+type BridgePlatform = 'feishu' | 'dingtalk' | 'telegram' | 'whatsapp' | 'qq' | 'wechat';
 
 interface BridgeSessionSummary {
   sessionKey: string;
@@ -43,10 +49,11 @@ type MenuState =
   | { type: 'sort'; items: ContextMenuItem[]; position: { x: number; y: number } }
   | { type: 'file'; file: FileRef; position: { x: number; y: number } };
 
-const BRIDGE_PLATFORMS: BridgePlatform[] = ['feishu', 'telegram', 'whatsapp', 'qq', 'wechat'];
+const BRIDGE_PLATFORMS: BridgePlatform[] = ['feishu', 'dingtalk', 'telegram', 'whatsapp', 'qq', 'wechat'];
 
 const BRIDGE_PLATFORM_LABEL_KEYS: Record<BridgePlatform, string> = {
   feishu: 'settings.bridge.feishu',
+  dingtalk: 'settings.bridge.dingtalk',
   telegram: 'settings.bridge.telegram',
   whatsapp: 'settings.bridge.whatsapp',
   qq: 'settings.bridge.qq',
@@ -55,6 +62,7 @@ const BRIDGE_PLATFORM_LABEL_KEYS: Record<BridgePlatform, string> = {
 
 const BRIDGE_PLATFORM_FALLBACK_LABELS: Record<BridgePlatform, string> = {
   feishu: 'Feishu',
+  dingtalk: 'DingTalk',
   telegram: 'Telegram',
   whatsapp: 'WhatsApp',
   qq: 'QQ',
@@ -82,20 +90,34 @@ function isExpired(file: FileRef): boolean {
   return file.status === 'expired';
 }
 
+function resourceAccessContext() {
+  return { connection: resolveServerConnection(useStore.getState()) };
+}
+
+function nativePathForFile(file: FileRef, options: { requireAvailable?: boolean } = {}): string | null {
+  return resolveFileRefNativePath(file, resourceAccessContext(), options);
+}
+
 function canPreviewFile(file: FileRef): boolean {
-  return !isExpired(file) && (!!file.path || (isMediaKind(file.kind) && !!file.inlineData));
+  return canPreviewFileRef(file, resourceAccessContext());
 }
 
 function canUseFilePath(file: FileRef): boolean {
-  return !isExpired(file) && !!file.path;
+  return canUseFileRefNativePath(file, resourceAccessContext(), { requireAvailable: true });
 }
 
 function canCopyFilePath(file: FileRef): boolean {
-  return !!file.path;
+  return canUseFileRefNativePath(file, resourceAccessContext());
 }
 
 function canDragFile(file: FileRef): boolean {
-  return !isExpired(file) && (!!file.path || !!file.inlineData);
+  return !isExpired(file) && (!!nativePathForFile(file, { requireAvailable: true }) || !!file.inlineData);
+}
+
+function canScreenshotShareFile(file: FileRef): boolean {
+  const nativePath = nativePathForFile(file, { requireAvailable: true });
+  return !!nativePath
+    && (file.kind === 'markdown' || isMarkdownFileName(file.name) || isMarkdownFileName(nativePath));
 }
 
 function bridgePlatformLabel(platform: BridgePlatform): string {
@@ -165,21 +187,21 @@ function pathBackedFiles(files: readonly FileRef[], opts: { requireAvailable?: b
   return files.filter(file => !!file.path && (!opts.requireAvailable || !isExpired(file)));
 }
 
+function nativePathBackedFiles(files: readonly FileRef[], opts: { requireAvailable?: boolean } = {}): FileRef[] {
+  return files.filter(file => !!nativePathForFile(file, opts));
+}
+
 function copyPaths(files: readonly FileRef[]): void {
-  const paths = pathBackedFiles(files).map(file => file.path);
+  const paths = files
+    .map(file => nativePathForFile(file))
+    .filter((path): path is string => !!path);
   if (paths.length === 0) return;
   navigator.clipboard?.writeText?.(paths.join('\n')).catch(() => {});
 }
 
 function previewFile(file: FileRef, sessionPath: string | null): void {
   if (!canPreviewFile(file)) return;
-  if (isMediaKind(file.kind)) {
-    openMediaViewerForRef(file, { origin: 'session', sessionPath: sessionPath ?? undefined });
-    return;
-  }
-  if (!file.path) return;
-  const ext = file.ext || extOfName(file.name) || '';
-  void openFilePreview(file.path, file.name, ext, {
+  void openFileRefPreview(file, {
     origin: 'session',
     sessionPath: sessionPath ?? undefined,
     messageId: file.sessionMessageId,
@@ -188,13 +210,15 @@ function previewFile(file: FileRef, sessionPath: string | null): void {
 }
 
 function openFile(file: FileRef): void {
-  if (!canUseFilePath(file)) return;
-  window.platform?.openFile?.(file.path);
+  const nativePath = nativePathForFile(file, { requireAvailable: true });
+  if (!nativePath) return;
+  window.platform?.openFile?.(nativePath);
 }
 
 function revealFile(file: FileRef): void {
-  if (!canUseFilePath(file)) return;
-  window.platform?.showInFinder?.(file.path);
+  const nativePath = nativePathForFile(file, { requireAvailable: true });
+  if (!nativePath) return;
+  window.platform?.showInFinder?.(nativePath);
 }
 
 function SortIcon() {
@@ -207,41 +231,7 @@ function SortIcon() {
   );
 }
 
-function FileKindIcon({ file }: { file: FileRef }) {
-  if (file.kind === 'image' || file.kind === 'svg') {
-    return (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <rect x="3" y="3" width="18" height="18" rx="2" />
-        <circle cx="8.5" cy="8.5" r="1.5" />
-        <polyline points="21 15 16 10 5 21" />
-      </svg>
-    );
-  }
-  if (file.kind === 'video') {
-    return (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <rect x="3" y="5" width="18" height="14" rx="2" />
-        <polygon points="10 9 15 12 10 15 10 9" />
-      </svg>
-    );
-  }
-  if (file.kind === 'code') {
-    return (
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-        <polyline points="16 18 22 12 16 6" />
-        <polyline points="8 6 2 12 8 18" />
-      </svg>
-    );
-  }
-  return (
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <polyline points="14 2 14 8 20 8" />
-    </svg>
-  );
-}
-
-function ActionIcon({ type }: { type: 'preview' | 'open' | 'reveal' | 'copy' }) {
+function ActionIcon({ type }: { type: 'preview' | 'open' | 'reveal' | 'copy' | 'download' }) {
   if (type === 'preview') {
     return (
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -264,6 +254,15 @@ function ActionIcon({ type }: { type: 'preview' | 'open' | 'reveal' | 'copy' }) 
       <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
         <path d="M3 6h7l2 2h9v10a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
         <circle cx="12" cy="14" r="2.5" />
+      </svg>
+    );
+  }
+  if (type === 'download') {
+    return (
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+        <path d="M12 3v12" />
+        <path d="M7 10l5 5 5-5" />
+        <path d="M5 21h14" />
       </svg>
     );
   }
@@ -294,6 +293,8 @@ function SessionFileRow({
   const canDrag = canDragFile(file);
   const canUsePath = canUseFilePath(file);
   const canCopyPath = canCopyFilePath(file);
+  const showPathActions = canUsePath || canCopyPath;
+  const downloadUrl = fileRefDownloadUrl(file);
 
   const stopAction = (event: React.MouseEvent, action: () => void) => {
     event.stopPropagation();
@@ -325,7 +326,7 @@ function SessionFileRow({
       onDragStart={(event) => onDragStart(event, file)}
     >
       <div className={styles.fileIcon} aria-hidden="true">
-        <FileKindIcon file={file} />
+        <FileKindIcon kind={file.kind} size={16} />
       </div>
       <div className={styles.fileMain}>
         <div className={styles.fileName} data-testid="session-file-name" title={file.name}>{file.name}</div>
@@ -347,39 +348,58 @@ function SessionFileRow({
         >
           <ActionIcon type="preview" />
         </button>
-        <button
-          type="button"
-          className={styles.fileAction}
-          data-session-file-action=""
-          aria-label={actionLabel('rightWorkspace.sessionFiles.actions.open', file)}
-          title={actionLabel('rightWorkspace.sessionFiles.actions.open', file)}
-          disabled={!canUsePath}
-          onClick={(event) => stopAction(event, () => openFile(file))}
-        >
-          <ActionIcon type="open" />
-        </button>
-        <button
-          type="button"
-          className={styles.fileAction}
-          data-session-file-action=""
-          aria-label={actionLabel('rightWorkspace.sessionFiles.actions.reveal', file)}
-          title={actionLabel('rightWorkspace.sessionFiles.actions.reveal', file)}
-          disabled={!canUsePath}
-          onClick={(event) => stopAction(event, () => revealFile(file))}
-        >
-          <ActionIcon type="reveal" />
-        </button>
-        <button
-          type="button"
-          className={styles.fileAction}
-          data-session-file-action=""
-          aria-label={actionLabel('rightWorkspace.sessionFiles.actions.copyPath', file)}
-          title={actionLabel('rightWorkspace.sessionFiles.actions.copyPath', file)}
-          disabled={!canCopyPath}
-          onClick={(event) => stopAction(event, () => copyPaths([file]))}
-        >
-          <ActionIcon type="copy" />
-        </button>
+        {showPathActions && (
+          <>
+            <button
+              type="button"
+              className={styles.fileAction}
+              data-session-file-action=""
+              aria-label={actionLabel('rightWorkspace.sessionFiles.actions.open', file)}
+              title={actionLabel('rightWorkspace.sessionFiles.actions.open', file)}
+              disabled={!canUsePath}
+              onClick={(event) => stopAction(event, () => openFile(file))}
+            >
+              <ActionIcon type="open" />
+            </button>
+            <button
+              type="button"
+              className={styles.fileAction}
+              data-session-file-action=""
+              aria-label={actionLabel('rightWorkspace.sessionFiles.actions.reveal', file)}
+              title={actionLabel('rightWorkspace.sessionFiles.actions.reveal', file)}
+              disabled={!canUsePath}
+              onClick={(event) => stopAction(event, () => revealFile(file))}
+            >
+              <ActionIcon type="reveal" />
+            </button>
+          </>
+        )}
+        {downloadUrl && (
+          <a
+            className={styles.fileAction}
+            data-session-file-action=""
+            aria-label={actionLabel('rightWorkspace.sessionFiles.actions.downloadToDevice', file)}
+            title={actionLabel('rightWorkspace.sessionFiles.actions.downloadToDevice', file)}
+            href={downloadUrl}
+            download={file.name}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <ActionIcon type="download" />
+          </a>
+        )}
+        {showPathActions && (
+          <button
+            type="button"
+            className={styles.fileAction}
+            data-session-file-action=""
+            aria-label={actionLabel('rightWorkspace.sessionFiles.actions.copyPath', file)}
+            title={actionLabel('rightWorkspace.sessionFiles.actions.copyPath', file)}
+            disabled={!canCopyPath}
+            onClick={(event) => stopAction(event, () => copyPaths([file]))}
+          >
+            <ActionIcon type="copy" />
+          </button>
+        )}
       </div>
     </article>
   );
@@ -601,8 +621,13 @@ export function SessionRegistryFilesPanel() {
 
   const buildFileMenuItems = useCallback((file: FileRef): ContextMenuItem[] => {
     const actionFiles = filesForAction(file);
-    const pathFiles = pathBackedFiles(actionFiles);
+    const pathFiles = nativePathBackedFiles(actionFiles);
     const sendableFiles = pathBackedFiles(actionFiles, { requireAvailable: true });
+    const screenshotFile = actionFiles.length === 1 && canScreenshotShareFile(actionFiles[0])
+      ? actionFiles[0]
+      : null;
+    const screenshotPath = screenshotFile ? nativePathForFile(screenshotFile, { requireAvailable: true }) : null;
+    const downloadUrl = fileRefDownloadUrl(file);
     const sendTargetItems: ContextMenuItem[] = bridgeTargetsLoading && !bridgeTargetsLoaded
       ? [{ label: tr('rightWorkspace.sessionFiles.actions.sendToBridgeLoading'), disabled: true }]
       : bridgeTargetsError
@@ -616,15 +641,36 @@ export function SessionRegistryFilesPanel() {
 
     return [
       { label: tr('rightWorkspace.sessionFiles.actions.preview'), disabled: !canPreviewFile(file), action: () => previewFile(file, currentSessionPath) },
-      { label: tr('rightWorkspace.sessionFiles.actions.open'), disabled: !canUseFilePath(file), action: () => openFile(file) },
-      { label: tr('rightWorkspace.sessionFiles.actions.reveal'), disabled: !canUseFilePath(file), action: () => revealFile(file) },
+      ...(canUseFilePath(file) || canCopyFilePath(file) ? [
+        { label: tr('rightWorkspace.sessionFiles.actions.open'), disabled: !canUseFilePath(file), action: () => openFile(file) },
+        { label: tr('rightWorkspace.sessionFiles.actions.reveal'), disabled: !canUseFilePath(file), action: () => revealFile(file) },
+      ] : []),
+      ...(screenshotFile && screenshotPath ? [{
+        label: tr('common.screenshotShare'),
+        action: () => {
+          void takeMarkdownFileScreenshot(screenshotPath, { fileName: screenshotFile.name });
+        },
+      }] : []),
       {
+        label: tr('rightWorkspace.sessionFiles.actions.downloadToDevice'),
+        disabled: !downloadUrl,
+        action: () => {
+          if (!downloadUrl) return;
+          // eslint-disable-next-line no-restricted-syntax -- context menu download has no rendered anchor to delegate to
+          const a = document.createElement('a');
+          a.href = downloadUrl;
+          a.download = file.name;
+          a.rel = 'noopener';
+          a.click();
+        },
+      },
+      ...(pathFiles.length > 0 ? [{
         label: pathFiles.length > 1
           ? tr('rightWorkspace.sessionFiles.actions.copySelectedPaths', { n: pathFiles.length })
           : tr('rightWorkspace.sessionFiles.actions.copyPath'),
-        disabled: pathFiles.length === 0,
+        disabled: false,
         action: () => copyPaths(pathFiles),
-      },
+      }] : []),
       { divider: true },
       {
         label: tr('rightWorkspace.sessionFiles.actions.sendToBridge'),
@@ -652,14 +698,16 @@ export function SessionRegistryFilesPanel() {
         id: item.id,
         fileId: item.fileId,
         name: item.name,
-        path: item.path,
+        path: nativePathForFile(item, { requireAvailable: true }) || '',
         isDirectory: false,
         mimeType: item.inlineData?.mimeType || item.mime,
         base64Data: item.inlineData?.base64,
       })),
     });
     event.currentTarget.addEventListener('dragend', () => clearAppFileDragPayload(payload.dragId), { once: true });
-    const paths = pathBackedFiles(availableFiles, { requireAvailable: true }).map(item => item.path);
+    const paths = availableFiles
+      .map(item => nativePathForFile(item, { requireAvailable: true }))
+      .filter((path): path is string => !!path);
     if (paths.length > 0) {
       event.preventDefault();
       window.platform?.startDrag?.(paths.length === 1 ? paths[0] : paths);
@@ -668,7 +716,7 @@ export function SessionRegistryFilesPanel() {
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
     if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'c') {
-      const pathFiles = pathBackedFiles(selectedFiles);
+      const pathFiles = nativePathBackedFiles(selectedFiles);
       if (pathFiles.length === 0) return;
       event.preventDefault();
       copyPaths(pathFiles);

@@ -6,17 +6,28 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, Dispatch, SetStateAction } from 'react';
 import { useStore } from '../../stores';
 import {
+  deskCreateFileInSubdir,
+  deskMkdirInSubdir,
   deskMoveTreeFiles,
+  deskNativeRootDir,
   deskRenameTreeItem,
   deskTrashTreeItems,
+  deskUploadBrowserFilesToSubdir,
   deskUploadFilesToSubdir,
   loadDeskTreeFiles,
 } from '../../stores/desk-actions';
 import { schedulePersistCurrentWorkspaceUiState } from '../../stores/workspace-ui-state-actions';
-import { openFilePreview } from '../../utils/file-preview';
+import { isMarkdownFileName } from '../../utils/file-kind';
+import {
+  canUseNativeResourcePath,
+  resolveWorkbenchNativePath,
+} from '../../services/resource-access';
+import { resolveServerConnection } from '../../services/server-connection';
+import { isWebRuntime, openWorkbenchFilePreview } from '../../utils/remote-file-preview';
+import { takeMarkdownFileScreenshot } from '../../utils/screenshot';
 import {
   clearAppFileDragPayload,
   readAppFileDragPayload,
@@ -36,9 +47,12 @@ function parentSubdir(path: string): string {
   return idx >= 0 ? path.slice(0, idx) : '';
 }
 
-function fullPath(basePath: string, subdir: string): string {
-  if (!basePath) return subdir;
-  return subdir ? `${basePath}/${subdir}` : basePath;
+function currentResourceAccessContext() {
+  return { connection: resolveServerConnection(useStore.getState()) };
+}
+
+function shouldUseBrowserDeskUpload(): boolean {
+  return isWebRuntime() || !canUseNativeResourcePath(currentResourceAccessContext());
 }
 
 function isDescendant(path: string, parent: string): boolean {
@@ -60,6 +74,20 @@ interface TreeSelectMeta {
   multi: boolean;
   shift: boolean;
 }
+
+export type InlineCreateKind = 'markdown' | 'folder';
+
+export type InlineTreeEdit =
+  | { mode: 'rename'; targetSubdir: string }
+  | {
+      mode: 'create';
+      parentSubdir: string;
+      kind: InlineCreateKind;
+      draftName: string;
+      content: string;
+      phase: 'editing' | 'saving';
+    }
+  | null;
 
 function collectVisibleTreeEntries(
   files: DeskFile[],
@@ -134,6 +162,28 @@ function toggleExpanded(paths: string[], subdir: string): string[] {
   return [...paths, subdir];
 }
 
+const BACKGROUND_TREE_REFRESH_DELAY_MS = 120;
+const backgroundTreeRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function deskRootKey(basePath: string, mountId: string | null): string {
+  return mountId ? `studio:${mountId}` : basePath;
+}
+
+function scheduleBackgroundTreeRefresh(subdir: string, rootKey: string): void {
+  if (!rootKey) return;
+  const key = `${rootKey}\n${subdir}`;
+  const existing = backgroundTreeRefreshTimers.get(key);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    backgroundTreeRefreshTimers.delete(key);
+    const state = useStore.getState();
+    if (deskRootKey(state.deskBasePath, state.deskWorkspaceMountId) !== rootKey) return;
+    if (!state.deskExpandedPaths.includes(subdir)) return;
+    void loadDeskTreeFiles(subdir, { force: true });
+  }, BACKGROUND_TREE_REFRESH_DELAY_MS);
+  backgroundTreeRefreshTimers.set(key, timer);
+}
+
 function TreeDisclosureIcon({ expanded }: { expanded: boolean }) {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
@@ -150,10 +200,12 @@ function dispatchDeskNotice(text: string): void {
 
 function RenameInput({
   initialValue,
+  disabled = false,
   onCommit,
   onCancel,
 }: {
   initialValue: string;
+  disabled?: boolean;
   onCommit: (value: string) => void;
   onCancel: () => void;
 }) {
@@ -172,6 +224,7 @@ function RenameInput({
     <input
       ref={inputRef}
       className={s.renameInput}
+      disabled={disabled}
       value={value}
       onChange={(event) => setValue(event.target.value)}
       onClick={(event) => event.stopPropagation()}
@@ -202,6 +255,45 @@ function RenameInput({
   );
 }
 
+function PendingCreateNode({
+  edit,
+  depth,
+  onCommit,
+  onCancel,
+}: {
+  edit: Extract<NonNullable<InlineTreeEdit>, { mode: 'create' }>;
+  depth: number;
+  onCommit: (edit: Extract<NonNullable<InlineTreeEdit>, { mode: 'create' }>, value: string) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const isFolder = edit.kind === 'folder';
+  return (
+    <div
+      className={`${s.treeItem} ${s.treeItemSelected}`}
+      role="treeitem"
+      aria-label={edit.draftName}
+      data-desk-item=""
+      data-desk-pending-create=""
+      data-selected="true"
+      style={{ '--tree-depth': depth } as CSSProperties}
+      tabIndex={0}
+    >
+      <span className={s.treeIndent} aria-hidden="true" />
+      <span className={s.treeDisclosure} aria-hidden="true" />
+      <span
+        className={s.itemIcon}
+        dangerouslySetInnerHTML={{ __html: isFolder ? ICONS.folder : getFileIcon(edit.draftName) }}
+      />
+      <RenameInput
+        initialValue={edit.draftName}
+        disabled={edit.phase === 'saving'}
+        onCommit={(value) => void onCommit(edit, value)}
+        onCancel={onCancel}
+      />
+    </div>
+  );
+}
+
 function TreeNode({
   file,
   parent,
@@ -212,9 +304,12 @@ function TreeNode({
   selectedPaths,
   onSelect,
   getDragEntries,
-  renamingPath,
+  inlineEdit,
+  onInlineEditChange,
+  onStartCreate,
   onBeginRename,
   onCommitRename,
+  onCommitCreate,
   onCancelRename,
 }: {
   file: DeskFile;
@@ -226,12 +321,19 @@ function TreeNode({
   selectedPaths: Set<string>;
   onSelect: (subdir: string, meta: TreeSelectMeta) => void;
   getDragEntries: (subdir: string) => VisibleTreeEntry[];
-  renamingPath: string | null;
+  inlineEdit: InlineTreeEdit;
+  onInlineEditChange: Dispatch<SetStateAction<InlineTreeEdit>>;
+  onStartCreate: (parentSubdir: string, kind: InlineCreateKind) => Promise<void>;
   onBeginRename: (subdir: string) => void;
   onCommitRename: (entry: VisibleTreeEntry, newName: string) => Promise<void>;
+  onCommitCreate: (edit: Extract<NonNullable<InlineTreeEdit>, { mode: 'create' }>, newName: string) => Promise<void>;
   onCancelRename: () => void;
 }) {
   const deskBasePath = useStore(st => st.deskBasePath);
+  const deskWorkspaceMountId = useStore(st => st.deskWorkspaceMountId);
+  // 工作台根的 native 路径：普通文件夹即 deskBasePath；local_fs mount 用服务端
+  // 披露的 native root（#1622）。远端/虚拟 mount 为 null，相关本地能力保持隐藏。
+  const nativeRootDir = useStore(deskNativeRootDir);
   const treeFilesByPath = useStore(st => st.deskTreeFilesByPath);
   const expandedPaths = useStore(st => st.deskExpandedPaths);
   const setDeskExpandedPaths = useStore(st => st.setDeskExpandedPaths);
@@ -239,9 +341,9 @@ function TreeNode({
   const expanded = file.isDir && expandedPaths.includes(subdir);
   const selected = selectedPaths.has(subdir);
   const children = treeFilesByPath[subdir] || [];
-  const t = window.t ?? ((p: string) => p);
   const [dropTarget, setDropTarget] = useState(false);
-  const isRenaming = renamingPath === subdir;
+  const isRenaming = inlineEdit?.mode === 'rename' && inlineEdit.targetSubdir === subdir;
+  const pendingChild = inlineEdit?.mode === 'create' && inlineEdit.parentSubdir === subdir ? inlineEdit : null;
 
   useEffect(() => {
     if (!dropTarget) return undefined;
@@ -258,16 +360,37 @@ function TreeNode({
 
   const toggleFolder = useCallback(() => {
     if (!file.isDir) return;
+    const hasCachedChildren = Object.prototype.hasOwnProperty.call(treeFilesByPath, subdir);
+    const rootKey = deskRootKey(deskBasePath, deskWorkspaceMountId);
     setDeskExpandedPaths(toggleExpanded(expandedPaths, subdir));
     schedulePersistCurrentWorkspaceUiState();
-    if (!expanded) void loadDeskTreeFiles(subdir);
-  }, [expanded, expandedPaths, file.isDir, setDeskExpandedPaths, subdir]);
+    if (!expanded) {
+      if (hasCachedChildren) scheduleBackgroundTreeRefresh(subdir, rootKey);
+      else void loadDeskTreeFiles(subdir);
+    }
+  }, [deskBasePath, deskWorkspaceMountId, expanded, expandedPaths, file.isDir, setDeskExpandedPaths, subdir, treeFilesByPath]);
+
+  const previewFile = useCallback(() => {
+    if (file.isDir) return;
+    void openWorkbenchFilePreview({
+      file,
+      subdir: parent,
+      mountId: deskWorkspaceMountId || null,
+      localRootPath: deskBasePath,
+      nativeRootPath: nativeRootDir,
+    });
+  }, [deskBasePath, deskWorkspaceMountId, file, nativeRootDir, parent]);
 
   const handleClick = useCallback((event: React.MouseEvent) => {
     const multi = event.metaKey || event.ctrlKey;
     onSelect(subdir, { multi, shift: event.shiftKey });
     if (file.isDir && !multi && !event.shiftKey) toggleFolder();
-  }, [file.isDir, onSelect, subdir, toggleFolder]);
+    const shouldPreviewOnClick = !file.isDir
+      && !multi
+      && !event.shiftKey
+      && (isWebRuntime() || !!deskWorkspaceMountId || !canUseNativeResourcePath(currentResourceAccessContext()));
+    if (shouldPreviewOnClick) previewFile();
+  }, [deskWorkspaceMountId, file.isDir, onSelect, previewFile, subdir, toggleFolder]);
 
   const openFile = useCallback(() => {
     onSelect(subdir, { multi: false, shift: false });
@@ -275,16 +398,24 @@ function TreeNode({
       if (!expanded) toggleFolder();
       return;
     }
-    const path = fullPath(deskBasePath, subdir);
-    const ext = file.name.split('.').pop()?.toLowerCase() || '';
-    openFilePreview(path, file.name, ext, { origin: 'desk' });
-  }, [deskBasePath, expanded, file, onSelect, subdir, toggleFolder]);
+    previewFile();
+  }, [expanded, file.isDir, onSelect, previewFile, subdir, toggleFolder]);
 
   const handleContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
+    const t = window.t ?? ((p: string, _vars?: Record<string, string | number>) => p);
     if (!selectedPaths.has(subdir)) onSelect(subdir, { multi: false, shift: false });
-    const path = fullPath(deskBasePath, subdir);
+    const resourceContext = currentResourceAccessContext();
+    const canUseNativePath = canUseNativeResourcePath(resourceContext);
+    const nativePath = resolveWorkbenchNativePath({
+      file,
+      subdir: parent,
+      mountId: deskWorkspaceMountId || null,
+      localRootPath: deskBasePath,
+      nativeRootPath: nativeRootDir,
+    }, resourceContext);
+    const screenshotSaveDir = nativePath ? (nativeRootDir || (!deskWorkspaceMountId ? deskBasePath : null)) : null;
     const actionEntries = getDragEntries(subdir);
     const deleteLabel = actionEntries.length > 1
       ? t('desk.ctx.deleteSelected', { count: actionEntries.length })
@@ -296,16 +427,40 @@ function TreeNode({
           label: t(file.isDir ? 'desk.ctx.open' : 'desk.openWithDefault'),
           action: () => {
             if (file.isDir) {
-              setDeskExpandedPaths(expandedPaths.includes(subdir) ? expandedPaths : [...expandedPaths, subdir]);
+              const hasCachedChildren = Object.prototype.hasOwnProperty.call(treeFilesByPath, subdir);
+              const rootKey = deskRootKey(deskBasePath, deskWorkspaceMountId);
+              const alreadyExpanded = expandedPaths.includes(subdir);
+              setDeskExpandedPaths(alreadyExpanded ? expandedPaths : [...expandedPaths, subdir]);
               schedulePersistCurrentWorkspaceUiState();
-              void loadDeskTreeFiles(subdir);
+              if (hasCachedChildren) scheduleBackgroundTreeRefresh(subdir, rootKey);
+              else void loadDeskTreeFiles(subdir);
             } else {
-              window.platform?.openFile?.(path);
+              if (nativePath && !isWebRuntime()) window.platform?.openFile?.(nativePath);
+              else previewFile();
             }
           },
         },
-        { label: t('desk.ctx.openInFinder'), action: () => window.platform?.showInFinder?.(path) },
-        { label: t('desk.ctx.copyPath'), action: () => navigator.clipboard.writeText(path).catch(() => {}) },
+        ...(file.isDir ? [
+          { label: t('desk.ctx.newMdFile'), action: () => { void onStartCreate(subdir, 'markdown'); } },
+          { label: t('desk.ctx.newFolder'), action: () => { void onStartCreate(subdir, 'folder'); } },
+        ] : []),
+        ...(!isWebRuntime() && nativePath ? [
+          { label: t('desk.ctx.openInFinder'), action: () => window.platform?.showInFinder?.(nativePath) },
+        ] : []),
+        ...(nativePath ? [
+          { label: t('desk.ctx.copyPath'), action: () => navigator.clipboard.writeText(nativePath).catch(() => {}) },
+        ] : []),
+        ...(!file.isDir && nativePath && screenshotSaveDir && isMarkdownFileName(file.name) && !isWebRuntime() ? [
+          {
+            label: t('common.screenshotShare'),
+            action: () => {
+              void takeMarkdownFileScreenshot(nativePath, { saveDir: screenshotSaveDir, fileName: file.name });
+            },
+          },
+        ] : []),
+        ...(!file.isDir && nativePath ? [
+          { label: t('desk.ctx.history'), action: () => { useStore.getState().openFileHistoryForAbsolutePath(nativePath); } },
+        ] : []),
         { divider: true },
         {
           label: t('desk.ctx.rename'),
@@ -315,7 +470,7 @@ function TreeNode({
         {
           label: deleteLabel,
           danger: true,
-          disabled: actionEntries.length === 0 || !window.platform?.trashItem,
+          disabled: actionEntries.length === 0 || (canUseNativePath && !isWebRuntime() && !deskWorkspaceMountId && !window.platform?.trashItem),
           action: async () => {
             const confirmed = window.confirm?.(
               actionEntries.length > 1
@@ -333,37 +488,56 @@ function TreeNode({
         },
       ],
     });
-  }, [deskBasePath, expandedPaths, file.isDir, file.name, getDragEntries, onBeginRename, onSelect, onShowMenu, selectedPaths, setDeskExpandedPaths, subdir, t]);
+  }, [deskBasePath, deskWorkspaceMountId, expandedPaths, file, getDragEntries, nativeRootDir, onBeginRename, onSelect, onShowMenu, onStartCreate, parent, previewFile, selectedPaths, setDeskExpandedPaths, subdir, treeFilesByPath]);
 
   const handleKeyDown = useCallback((event: React.KeyboardEvent) => {
-    if (event.key !== 'Enter' || isRenaming) return;
+    if (event.key !== 'Enter' || isRenaming || inlineEdit) return;
     event.preventDefault();
     event.stopPropagation();
     onSelect(subdir, { multi: false, shift: false });
     onBeginRename(subdir);
-  }, [isRenaming, onBeginRename, onSelect, subdir]);
+  }, [inlineEdit, isRenaming, onBeginRename, onSelect, subdir]);
 
   const handleDragStart = useCallback((e: React.DragEvent) => {
     e.stopPropagation();
     if (!selectedPaths.has(subdir)) onSelect(subdir, { multi: false, shift: false });
     const dragEntries = getDragEntries(subdir);
-    const draggedFiles = dragEntries.map(entry => ({
-      id: `workspace:${entry.subdir}`,
-      name: entry.file.name,
-      path: fullPath(deskBasePath, entry.subdir),
-      sourceSubdir: entry.parent,
-      isDirectory: entry.file.isDir,
-    }));
-    if (draggedFiles.length === 0) return;
+    // native root 可用时（普通文件夹 / 披露了 native root 的 local_fs mount）
+    // 携带真实绝对路径并发起原生拖拽；只有拿不到 native 路径的 mount 才退回
+    // workbench 引用（#1622）。
+    const resourceContext = currentResourceAccessContext();
+    const dragRows = dragEntries.map(entry => {
+      const nativePath = resolveWorkbenchNativePath({
+        file: entry.file,
+        subdir: entry.parent,
+        mountId: deskWorkspaceMountId || null,
+        localRootPath: deskBasePath,
+        nativeRootPath: nativeRootDir,
+      }, resourceContext);
+      return {
+        nativePath,
+        payload: {
+          id: `workspace:${entry.subdir}`,
+          name: entry.file.name,
+          path: nativePath || `workbench:${deskWorkspaceMountId || 'default'}:${entry.subdir}`,
+          sourceSubdir: entry.parent,
+          isDirectory: entry.file.isDir,
+        },
+      };
+    });
+    if (dragRows.length === 0) return;
+    const draggedFiles = dragRows.map(row => row.payload);
     const payload = writeAppFileDragPayload(e.dataTransfer, {
       source: 'workspace',
       files: draggedFiles,
     });
     e.currentTarget.addEventListener('dragend', () => clearAppFileDragPayload(payload.dragId), { once: true });
     e.preventDefault();
-    const paths = draggedFiles.map(item => item.path);
-    window.platform?.startDrag?.(paths.length === 1 ? paths[0] : paths);
-  }, [deskBasePath, getDragEntries, onSelect, selectedPaths, subdir]);
+    const nativePaths = dragRows.map(row => row.nativePath).filter((path): path is string => !!path);
+    if (nativePaths.length === dragRows.length && nativePaths.length > 0) {
+      window.platform?.startDrag?.(nativePaths.length === 1 ? nativePaths[0] : nativePaths);
+    }
+  }, [deskBasePath, deskWorkspaceMountId, getDragEntries, nativeRootDir, onSelect, selectedPaths, subdir]);
 
   const handleDragOver = useCallback((e: React.DragEvent) => {
     if (!file.isDir) return;
@@ -399,6 +573,11 @@ function TreeNode({
 
     const files = e.dataTransfer.files;
     if (files && files.length > 0) {
+      if (shouldUseBrowserDeskUpload() || deskWorkspaceMountId) {
+        await deskUploadBrowserFilesToSubdir(Array.from(files), subdir);
+        setDropTarget(false);
+        return;
+      }
       const paths: string[] = [];
       for (const f of Array.from(files)) {
         const p = window.platform?.getFilePath?.(f);
@@ -406,7 +585,7 @@ function TreeNode({
       }
       if (paths.length > 0) await deskUploadFilesToSubdir(paths, subdir);
     }
-  }, [file.isDir, subdir]);
+  }, [deskWorkspaceMountId, file.isDir, subdir]);
 
   return (
     <>
@@ -414,6 +593,7 @@ function TreeNode({
         className={`${s.treeItem}${selected ? ` ${s.treeItemSelected}` : ''}${dropTarget ? ` ${s.treeItemDropTarget}` : ''}`}
         role="treeitem"
         aria-label={file.name}
+        title={file.name}
         aria-expanded={file.isDir ? expanded : undefined}
         data-desk-item=""
         data-desk-path={subdir}
@@ -436,7 +616,11 @@ function TreeNode({
         </span>
         <span
           className={s.itemIcon}
-          dangerouslySetInnerHTML={{ __html: file.isDir ? ICONS.folder : getFileIcon(file.name) }}
+          dangerouslySetInnerHTML={{
+            __html: file.isDir
+              ? (expanded ? ICONS.folderOpen : ICONS.folder)
+              : getFileIcon(file.name),
+          }}
         />
         {isRenaming ? (
           <RenameInput
@@ -448,8 +632,16 @@ function TreeNode({
           <span className={s.itemName} title={file.name}>{file.name}</span>
         )}
       </div>
-      {expanded && children.length > 0 && (
+      {expanded && (children.length > 0 || pendingChild) && (
         <div role="group" className={s.treeGroup}>
+          {pendingChild && (
+            <PendingCreateNode
+              edit={pendingChild}
+              depth={depth + 1}
+              onCommit={onCommitCreate}
+              onCancel={onCancelRename}
+            />
+          )}
           {sortDeskFiles(children, sortMode).filter(child => fileMatchesTypeFilters(child, typeFilters)).map(child => (
             <TreeNode
               key={childSubdir(subdir, child.name)}
@@ -462,9 +654,12 @@ function TreeNode({
               selectedPaths={selectedPaths}
               onSelect={onSelect}
               getDragEntries={getDragEntries}
-              renamingPath={renamingPath}
+              inlineEdit={inlineEdit}
+              onInlineEditChange={onInlineEditChange}
+              onStartCreate={onStartCreate}
               onBeginRename={onBeginRename}
               onCommitRename={onCommitRename}
+              onCommitCreate={onCommitCreate}
               onCancelRename={onCancelRename}
             />
           ))}
@@ -474,10 +669,20 @@ function TreeNode({
   );
 }
 
-export function DeskTree({ sortMode, typeFilters = [], onShowMenu }: {
+export function DeskTree({
+  sortMode,
+  typeFilters = [],
+  onShowMenu,
+  inlineEdit,
+  onInlineEditChange,
+  onStartCreate,
+}: {
   sortMode: SortMode;
   typeFilters?: FileTypeFilter[];
   onShowMenu: (state: CtxMenuState) => void;
+  inlineEdit: InlineTreeEdit;
+  onInlineEditChange: Dispatch<SetStateAction<InlineTreeEdit>>;
+  onStartCreate: (parentSubdir: string, kind: InlineCreateKind) => Promise<void>;
 }) {
   const deskBasePath = useStore(s => s.deskBasePath);
   const rootFiles = useStore(s => s.deskTreeFilesByPath[''] || s.deskFiles);
@@ -485,7 +690,7 @@ export function DeskTree({ sortMode, typeFilters = [], onShowMenu }: {
   const expandedPaths = useStore(s => s.deskExpandedPaths);
   const deskSelectedPath = useStore(s => s.deskSelectedPath);
   const setDeskSelectedPath = useStore(s => s.setDeskSelectedPath);
-  const activeTypeFilters = typeFilters || [];
+  const activeTypeFilters = typeFilters;
   const treeRef = useRef<HTMLDivElement | null>(null);
   const localSelectionRef = useRef(false);
   const sortedRootFiles = useMemo(
@@ -498,7 +703,6 @@ export function DeskTree({ sortMode, typeFilters = [], onShowMenu }: {
   );
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [selectionAnchor, setSelectionAnchor] = useState<string | null>(null);
-  const [renamingPath, setRenamingPath] = useState<string | null>(null);
 
   useEffect(() => {
     if (!deskBasePath) return;
@@ -579,28 +783,28 @@ export function DeskTree({ sortMode, typeFilters = [], onShowMenu }: {
     setSelectedPaths(new Set([subdir]));
     setSelectionAnchor(subdir);
     setDeskSelectedPath(subdir);
-    setRenamingPath(subdir);
-  }, [setDeskSelectedPath]);
+    onInlineEditChange({ mode: 'rename', targetSubdir: subdir });
+  }, [onInlineEditChange, setDeskSelectedPath]);
 
   const cancelRename = useCallback(() => {
-    setRenamingPath(null);
-  }, []);
+    onInlineEditChange(null);
+  }, [onInlineEditChange]);
 
   const commitRename = useCallback(async (entry: VisibleTreeEntry, nextName: string) => {
     const trimmed = nextName.trim();
     if (!trimmed || trimmed === entry.file.name) {
-      setRenamingPath(null);
+      onInlineEditChange(null);
       return;
     }
     if (trimmed.includes('/') || trimmed.includes('\\')) {
       dispatchDeskNotice(window.t?.('desk.renameInvalid') || 'desk.renameInvalid');
-      setRenamingPath(null);
+      onInlineEditChange(null);
       return;
     }
     const ok = await deskRenameTreeItem(entry.parent, entry.file.name, trimmed, entry.file.isDir);
     if (!ok) {
       dispatchDeskNotice(window.t?.('desk.renameFailed') || 'desk.renameFailed');
-      setRenamingPath(null);
+      onInlineEditChange(null);
       return;
     }
     const nextSubdir = childSubdir(entry.parent, trimmed);
@@ -608,8 +812,39 @@ export function DeskTree({ sortMode, typeFilters = [], onShowMenu }: {
     setSelectedPaths(new Set([nextSubdir]));
     setSelectionAnchor(nextSubdir);
     setDeskSelectedPath(nextSubdir);
-    setRenamingPath(null);
-  }, [setDeskSelectedPath]);
+    onInlineEditChange(null);
+  }, [onInlineEditChange, setDeskSelectedPath]);
+
+  const commitCreate = useCallback(async (
+    edit: Extract<NonNullable<InlineTreeEdit>, { mode: 'create' }>,
+    nextName: string,
+  ) => {
+    const trimmed = nextName.trim();
+    if (!trimmed) {
+      onInlineEditChange(null);
+      return;
+    }
+    if (trimmed.includes('/') || trimmed.includes('\\')) {
+      dispatchDeskNotice(window.t?.('desk.renameInvalid') || 'desk.renameInvalid');
+      onInlineEditChange(null);
+      return;
+    }
+    onInlineEditChange(current => current === edit ? { ...edit, phase: 'saving' } : current);
+    const ok = edit.kind === 'folder'
+      ? await deskMkdirInSubdir(edit.parentSubdir, trimmed)
+      : await deskCreateFileInSubdir(edit.parentSubdir, trimmed, edit.content);
+    if (!ok) {
+      dispatchDeskNotice(window.t?.('desk.createFailed') || 'desk.createFailed');
+      onInlineEditChange(null);
+      return;
+    }
+    const nextSubdir = childSubdir(edit.parentSubdir, trimmed);
+    localSelectionRef.current = true;
+    setSelectedPaths(new Set([nextSubdir]));
+    setSelectionAnchor(nextSubdir);
+    setDeskSelectedPath(nextSubdir);
+    onInlineEditChange(null);
+  }, [onInlineEditChange, setDeskSelectedPath]);
 
   const clearSelectionFromBlankSpace = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target as HTMLElement | null;
@@ -617,9 +852,9 @@ export function DeskTree({ sortMode, typeFilters = [], onShowMenu }: {
     localSelectionRef.current = true;
     setSelectedPaths(new Set());
     setSelectionAnchor(null);
-    setRenamingPath(null);
+    onInlineEditChange(null);
     setDeskSelectedPath('');
-  }, [setDeskSelectedPath]);
+  }, [onInlineEditChange, setDeskSelectedPath]);
 
   return (
     <div
@@ -630,6 +865,14 @@ export function DeskTree({ sortMode, typeFilters = [], onShowMenu }: {
       data-empty-text={window.t?.('common.noFiles') || ''}
       onClick={clearSelectionFromBlankSpace}
     >
+      {inlineEdit?.mode === 'create' && inlineEdit.parentSubdir === '' && (
+        <PendingCreateNode
+          edit={inlineEdit}
+          depth={0}
+          onCommit={commitCreate}
+          onCancel={cancelRename}
+        />
+      )}
       {sortedRootFiles.map(file => (
         <TreeNode
           key={file.name}
@@ -642,9 +885,12 @@ export function DeskTree({ sortMode, typeFilters = [], onShowMenu }: {
           selectedPaths={selectedPaths}
           onSelect={selectTreePath}
           getDragEntries={getDragEntries}
-          renamingPath={renamingPath}
+          inlineEdit={inlineEdit}
+          onInlineEditChange={onInlineEditChange}
+          onStartCreate={onStartCreate}
           onBeginRename={beginRename}
           onCommitRename={commitRename}
+          onCommitCreate={commitCreate}
           onCancelRename={cancelRename}
         />
       ))}

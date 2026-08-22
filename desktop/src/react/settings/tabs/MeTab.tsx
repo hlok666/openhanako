@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../store';
 import { hanaFetch } from '../api';
 import { invalidateConfigCache } from '../../hooks/use-config';
@@ -9,7 +10,10 @@ import { SettingsRow } from '../components/SettingsRow';
 import styles from '../Settings.module.css';
 
 export function MeTab() {
-  const { settingsConfig, userAvatarUrl, showToast } = useSettingsStore();
+  const { settingsConfig, userAvatarUrl } = useSettingsStore(
+    useShallow(s => ({ settingsConfig: s.settingsConfig, userAvatarUrl: s.userAvatarUrl }))
+  );
+  const showToast = useSettingsStore(s => s.showToast);
   const [userName, setUserName] = useState('');
   const [userProfile, setUserProfile] = useState('');
 
@@ -36,6 +40,9 @@ export function MeTab() {
 
       const requests: Promise<Response>[] = [];
       if (Object.keys(partial).length) {
+        // The name describes the person using Hana, not any one agent, so it is
+        // stored globally and saved through the global config route. Every agent
+        // reads the same value.
         requests.push(hanaFetch('/api/config', {
           method: 'PUT',
           headers: { 'Content-Type': 'application/json' },
@@ -86,7 +93,7 @@ export function MeTab() {
     <div className={`${styles['settings-tab-content']} ${styles['active']}`} data-tab="me">
       {/* 整页 flush：无 section 白卡，input/textarea 自己就是视觉卡片
        * avatar + 两个字段并列，字段间靠白空间分隔 */}
-      <SettingsSection variant="flush">
+      <SettingsSection surface="plain">
         <div className={styles['settings-avatar-center']}>
           <div className={styles['avatar-upload']} onClick={handleAvatarClick}>
             {userAvatarUrl ? (
@@ -104,7 +111,7 @@ export function MeTab() {
         </div>
 
         <SettingsRow
-          label="名字"
+          label={t('settings.me.nameLabel')}
           hint={t('settings.me.userNameHint')}
           layout="stacked"
           control={
@@ -134,7 +141,7 @@ export function MeTab() {
       </SettingsSection>
 
       {/* 保存按钮：tab 底部独立居中，用实心 accent 样式（页面级主动作） */}
-      <div style={{ display: 'flex', justifyContent: 'center', marginTop: 'var(--space-md)' }}>
+      <div className={styles['settings-page-primary-action']}>
         <button className={styles['settings-save-btn-sm']} onClick={save}>
           {t('settings.save')}
         </button>

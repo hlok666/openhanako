@@ -6,7 +6,23 @@ import globals from 'globals';
 export default [
   // Global ignores — must be a standalone config object with only `ignores`
   {
-    ignores: ['node_modules/', 'dist/', 'dist-renderer/', '**/*.cjs'],
+    ignores: [
+      'node_modules/',
+      '**/dist/**',
+      // Build scripts emit several sibling directories such as dist-server,
+      // dist-server-artifact, dist-renderer-artifact, and dist-computer-use.
+      // Keep the naming contract here instead of chasing every new output.
+      'dist-*/**',
+      // Desktop Vite builds use the same family for dist-renderer and
+      // dist-splash; both contain bundled JavaScript that must not be linted.
+      'desktop/dist-*/**',
+      'desktop/native/**/.build/**',
+      '.claude/**',
+      '.cache/**',
+      // .docs/ 不入版本控制、CI 不可见；lint 覆盖它会造成本地/CI 语义不对称
+      '.docs/**',
+      '**/*.cjs',
+    ],
   },
 
   js.configs.recommended,
@@ -32,9 +48,21 @@ export default [
     },
   },
 
-  // Server-side JS files
+  // Node-side JS files
   {
-    files: ['server/**/*.js'],
+    files: [
+      'cli/**/*.{js,ts}',
+      'core/**/*.{js,ts}',
+      'hub/**/*.{js,ts}',
+      'index.js',
+      'lib/**/*.{js,ts}',
+      'plugins/**/*.{js,ts}',
+      'scripts/**/*.{js,mjs,ts}',
+      'tools/npm-ea/**/*.mjs',
+      'server/**/*.{js,ts}',
+      'shared/**/*.{js,ts}',
+      'tests/**/*.{js,ts,tsx}',
+    ],
     languageOptions: {
       globals: {
         ...globals.node,
@@ -44,14 +72,56 @@ export default [
     },
   },
 
+  // Vitest files mix Node helpers with jsdom/browser primitives.
+  {
+    files: ['tests/**/*.{js,ts,tsx}'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+        ...globals.browser,
+      },
+    },
+  },
+
+  // Browser package TypeScript files
+  {
+    files: [
+      'packages/plugin-sdk/src/**/*.ts',
+      'packages/plugin-components/src/**/*.{ts,tsx}',
+    ],
+    languageOptions: {
+      globals: {
+        ...globals.browser,
+      },
+    },
+  },
+
   // TypeScript/React frontend files
   {
-    files: ['desktop/src/**/*.{ts,tsx}'],
+    files: [
+      'desktop/src/**/*.{ts,tsx}',
+      'packages/plugin-components/src/**/*.{ts,tsx}',
+    ],
     plugins: {
       'react-hooks': reactHooks,
     },
     rules: {
-      // Prevent document.createElement in React components
+      'react-hooks/rules-of-hooks': 'error',
+      'react-hooks/exhaustive-deps': 'warn',
+      '@typescript-eslint/no-explicit-any': 'warn',
+      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
+    },
+  },
+
+  // React components should render with JSX. DOM utilities, CodeMirror widgets,
+  // and tests may create DOM nodes directly.
+  {
+    files: ['desktop/src/react/**/*.tsx'],
+    ignores: [
+      'desktop/src/react/**/__tests__/**',
+      'desktop/src/react/**/*.test.tsx',
+    ],
+    rules: {
       'no-restricted-syntax': [
         'error',
         {
@@ -61,10 +131,6 @@ export default [
             'React 组件中不要用 document.createElement，用 JSX。如确需操作 DOM（canvas/resize），加 eslint-disable 注释说明原因。',
         },
       ],
-      'react-hooks/rules-of-hooks': 'error',
-      'react-hooks/exhaustive-deps': 'warn',
-      '@typescript-eslint/no-explicit-any': 'warn',
-      '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
     },
   },
 
@@ -74,18 +140,19 @@ export default [
       'no-empty': 'warn',
       'prefer-const': 'warn',
       'no-useless-escape': 'warn',
+      '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/no-unused-vars': ['warn', { argsIgnorePattern: '^_' }],
     },
   },
 
   // 禁止绕过 adapter 直接导入 PI SDK（后端全覆盖）
   {
-    files: ['core/**/*.js', 'lib/**/*.js', 'hub/**/*.js', 'server/**/*.js'],
+    files: ['core/**/*.{js,ts}', 'lib/**/*.{js,ts}', 'hub/**/*.{js,ts}', 'server/**/*.{js,ts}'],
     ignores: ['lib/pi-sdk/**'],
     rules: {
       'no-restricted-imports': ['error', {
         patterns: [{
-          group: ['@mariozechner/*'],
+          group: ['@mariozechner/*', '@earendil-works/*'],
           message: '请从 lib/pi-sdk/index.js 导入，不要直接引用 PI SDK 包。',
         }],
       }],
@@ -94,7 +161,7 @@ export default [
 
   // Prevent engine._ access in server routes
   {
-    files: ['server/routes/**/*.js'],
+    files: ['server/routes/**/*.{js,ts}'],
     rules: {
       'no-restricted-syntax': [
         'error',

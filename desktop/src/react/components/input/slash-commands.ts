@@ -16,41 +16,64 @@ export const XING_PROMPT = isZh
   ? `回顾本次对话中我（用户）发送的消息，提取可复用的工作流程、纠正和操作经验。
 
 不要把用户的个人画像、审美喜好、兴趣、生活近况写进技能；这些属于记忆系统。
-只把“以后遇到类似任务应该怎么做”的内容写成自学技能。
+只把“以后遇到类似任务应该怎么做”的内容写成通用技能。
 
 你必须先查阅 skill-creator 技能，按照其中 "Capture Intent" 和 "Write the SKILL.md" 部分的流程操作。
 只做到创建并安装为止，不需要做 eval、benchmark 或 description optimization。
 
-最终调用 install_skill 工具将技能安装为自学技能（skill_content + skill_name 模式）。`
+最终产物必须是完整 skill package：包含 SKILL.md，且 references/scripts/assets 等配套资源必须保留在同一个 skill 目录里。不要调用 install_skill 传 skill_content；模型侧 install_skill 只接受 GitHub 仓库等完整包来源。如果本轮生成的是本地 skill，请先把完整目录写到工作区并说明需要通过技能管理导入该目录或 zip，不能把单个 SKILL.md 冒充成完整安装。`
   : `Review the messages I (the user) sent in this session and extract reusable workflows, corrections, and operational lessons.
 
 Do not write the user's personal profile, aesthetic tastes, interests, or life/current-state context into a skill; those belong in memory.
-Only turn "how to handle similar tasks in the future" into a learned skill.
+Only turn "how to handle similar tasks in the future" into a reusable skill.
 
 You must first consult the skill-creator skill, following its "Capture Intent" and "Write the SKILL.md" sections.
 Only go as far as creating and installing — do not run evals, benchmarks, or description optimization.
 
-Use the install_skill tool to install the skill as a learned skill (skill_content + skill_name mode).`;
+The final artifact must be a complete skill package: it must contain SKILL.md, and references/scripts/assets must stay in the same skill directory when needed. Do not call install_skill with skill_content; the model-facing install_skill tool only accepts complete package sources such as GitHub repositories. If this session creates a local skill, write the complete directory into the workspace and explain that the user should import that directory or zip through skill management; never treat a single SKILL.md as a complete install.`;
 
 // ── Slash Command Interface ──
 
 export interface SlashItem {
   name: string;
+  aliases?: string[];
   label: string;
   description: string;
   busyLabel: string;
   icon: string;
-  type: 'builtin' | 'skill';
-  execute: () => Promise<void> | void;
+  type: 'builtin' | 'skill' | 'server-command';
+  execute: (inputText?: string) => Promise<void> | void;
 }
 
 export const MAX_SLASH_TRIGGER_LENGTH = 20;
 
+/**
+ * applySlashCompletion — 菜单选择 server-command 后，把编辑器原始文本改写为
+ * canonical 命令文本（`/${item.name}`），保留首个 slash token 之后的一切内容
+ * （空格、参数、多行）。非 slash 开头的文本走菜单按钮时丢弃输入，回退为纯
+ * canonical 命令（复刻既有兜底语义）。一律替换为 canonical name（不保留用户
+ * 输入的 alias），因为服务端 dispatch 的 alias 解析能力未验证。
+ */
+export function applySlashCompletion(
+  text: string,
+  item: Pick<SlashItem, 'name'>,
+): string {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith('/')) return `/${item.name}`;
+  const tokenMatch = /^\/(\S*)/.exec(trimmed);
+  if (!tokenMatch) return `/${item.name}`;
+  return `/${item.name}${trimmed.slice(tokenMatch[0].length)}`;
+}
+
 export function getSlashMatches(text: string, commands: SlashItem[]): SlashItem[] {
   const normalized = text.trim();
-  if (!normalized.startsWith('/') || normalized.length > MAX_SLASH_TRIGGER_LENGTH) return [];
-  const query = normalized.slice(1).toLowerCase();
-  return commands.filter(command => command.name.startsWith(query));
+  if (!normalized.startsWith('/')) return [];
+  const query = normalized.slice(1).split(/\s+/, 1)[0].toLowerCase();
+  if (query.length > MAX_SLASH_TRIGGER_LENGTH) return [];
+  return commands.filter(command => {
+    if (command.name.startsWith(query)) return true;
+    return (command.aliases || []).some(alias => alias.toLowerCase().startsWith(query));
+  });
 }
 
 export function resolveSlashSubmitSelection({
@@ -70,50 +93,90 @@ export function resolveSlashSubmitSelection({
   const matches = getSlashMatches(text, commands);
   if (matches.length === 0) return null;
   if (dismissedText === text.trim()) return null;
-  return matches[selectedIndex] || matches[0] || null;
+  const selected = matches[selectedIndex] || matches[0] || null;
+  if (!selected) return null;
+  const hasArgs = /\s/.test(text.trim().slice(1));
+  if (hasArgs && selected.type !== 'server-command') return null;
+  return selected;
 }
 
 // ── Command Executors ──
 
+type ToastType = 'success' | 'error' | 'info' | 'warning';
+type AddToast = (
+  text: string,
+  type?: ToastType,
+  duration?: number,
+  opts?: { persistent?: boolean; dedupeKey?: string },
+) => number | null;
+type RemoveToast = (id: number) => void;
+
+const DIARY_WRITE_TIMEOUT_MS = 150_000;
+
 export function executeDiary(
   t: (key: string) => string,
-  showResult: (text: string, type: 'success' | 'error') => void,
-  setBusy: (name: string | null) => void,
+  addToast: AddToast,
+  removeToast: RemoveToast,
   setInput: (text: string) => void,
   setMenuOpen: (open: boolean) => void,
-): () => Promise<void> {
-  return async () => {
-    setBusy('diary');
+): () => void {
+  return () => {
     setInput('');
     setMenuOpen(false);
-    try {
-      const res = await hanaFetch('/api/diary/write', { method: 'POST' });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        showResult(data.error || t('slash.diaryFailed'), 'error');
-        return;
+    const progressToastId = addToast(t('slash.diaryBusy'), 'info', 0, {
+      persistent: true,
+      dedupeKey: 'slash-diary-progress',
+    });
+
+    void (async () => {
+      try {
+        const res = await hanaFetch('/api/diary/write', {
+          method: 'POST',
+          timeout: DIARY_WRITE_TIMEOUT_MS,
+          throwOnHttpError: false,
+        });
+        let data: { error?: string } = {};
+        try {
+          data = await res.json();
+        } catch {
+          data = {};
+        }
+        if (progressToastId !== null) removeToast(progressToastId);
+        if (!res.ok || data.error) {
+          addToast(data.error || t('slash.diaryFailed'), 'error', 6000);
+          return;
+        }
+        addToast(t('slash.diaryDone'), 'success', 5000);
+      } catch {
+        if (progressToastId !== null) removeToast(progressToastId);
+        addToast(t('slash.diaryFailed'), 'error', 6000);
       }
-      showResult(t('slash.diaryDone'), 'success');
-    } catch {
-      showResult(t('slash.diaryFailed'), 'error');
-    }
+    })();
   };
 }
 
 export function executeCompact(
+  t: (key: string) => string,
   setBusy: (name: string | null) => void,
   setInput: (text: string) => void,
   setMenuOpen: (open: boolean) => void,
 ): () => Promise<void> {
   return async () => {
+    const state = useStore.getState();
+    if (!state.currentSessionId) {
+      state.addToast(t('error.noActiveSession'), 'error', 6000);
+      return;
+    }
+    const ws = getWebSocket();
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      state.addToast(t('status.disconnected'), 'error', 6000);
+      return;
+    }
     setBusy('compact');
     setInput('');
     setMenuOpen(false);
     try {
-      const ws = getWebSocket();
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({ type: 'compact', sessionPath: useStore.getState().currentSessionPath }));
-      }
+      ws.send(JSON.stringify({ type: 'compact', sessionId: state.currentSessionId }));
     } finally {
       setTimeout(() => setBusy(null), 1500);
     }
@@ -122,31 +185,42 @@ export function executeCompact(
 
 /**
  * 通用的 WS slash 命令发送器。
- * 一期服务 /stop /new /reset 三条系统命令；未来扩展时（插件命令、skill 命令）也共用这条 WS 通道。
- * 后端在 server/routes/chat.js 接收 {type:'slash'}，走 engine.slashDispatcher.tryDispatch。
+ * 桌面端的入口是菜单里的 server-command 类命令（/loop、插件与扩展注册的命令），
+ * 以及用户直接敲出的同名 slash 文本；桌面已有 GUI 的 core 命令不从这里走。
+ * 后端在 server/routes/chat.ts 接收 {type:'slash'}，走 engine.slashDispatcher.tryDispatch。
  *
- * TODO(frontend): 服务端会通过 WS {type:'slash_result'} 回复结果（未知命令 / handler reply），
- *   目前前端没有 consumer——/new /reset 的 not-found、已归档等 distinct reply 无法显示给用户。
- *   下一步应在 ws-message-handler.ts 加 slash_result 分支，把 text 展示到 slashResult state。
- *   当前的 800ms setBusy(null) 只是视觉 hack，不等真正执行完成。
+ * agentId 由调用方显式传入，不在这里从任何全局指针推导：命令要在哪个助手身上执行，
+ * 只有渲染这个输入框的会话说了算。服务端认的是会话清单里记着的归属，跟这个会话有没有
+ * 被加载进内存无关；这个字段覆盖的是另一种情况——服务端根本不认识的草稿会话，它还没
+ * 落进清单，归属只有前端知道。身份确实未知时传 null，让"不知道"显式出现在协议上，
+ * 而不是悄悄少一个字段。
+ *
+ * 执行结果由服务端通过 WS {type:'slash_result'} 回来，ws-message-handler 的同名分支
+ * 把它送进 inline notice 显示给用户。这里的 800ms setBusy(null) 与结果无关，只是给按钮
+ * 一个防抖窗口，不代表命令已经执行完。
  */
 export function executeSlashViaWs(
   cmd: string,
+  agentId: string | null,
   setBusy: (name: string | null) => void,
   setInput: (text: string) => void,
   setMenuOpen: (open: boolean) => void,
-): () => Promise<void> {
-  return async () => {
+): (inputText?: string) => Promise<void> {
+  return async (inputText?: string) => {
     setBusy(cmd);
     setInput('');
     setMenuOpen(false);
+    const rawText = typeof inputText === 'string' && inputText.trim().startsWith('/')
+      ? inputText.trim()
+      : `/${cmd}`;
     try {
       const ws = getWebSocket();
       if (ws?.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
           type: 'slash',
-          text: '/' + cmd,
+          text: rawText,
           sessionPath: useStore.getState().currentSessionPath,
+          agentId: agentId || null,
         }));
       }
     } finally {
@@ -157,10 +231,9 @@ export function executeSlashViaWs(
 
 export function buildSlashCommands(
   t: (key: string) => string,
-  executeDiaryFn: () => Promise<void>,
+  executeDiaryFn: () => Promise<void> | void,
   executeXingFn: () => Promise<void>,
   executeCompactFn: () => Promise<void>,
-  slashViaWsFactory?: (cmd: string) => () => Promise<void>,
 ): SlashItem[] {
   const list: SlashItem[] = [
     {
@@ -190,38 +263,17 @@ export function buildSlashCommands(
       type: 'builtin',
       execute: executeCompactFn,
     },
+    // /loop 是服务端命令且必须带参数（任务描述 / 子命令），所以走 server-command 通道：
+    // 提交时由 InputArea 经 applySlashCompletion 保留参数原文，再整条发给服务端 dispatcher。
+    {
+      name: 'loop',
+      label: '/loop',
+      description: t('slash.loop'),
+      busyLabel: '',
+      icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>',
+      type: 'server-command',
+      execute: () => {},
+    },
   ];
-  // slashViaWsFactory 由 InputArea 注入；没传则兼容既有调用方（如测试）
-  if (slashViaWsFactory) {
-    list.push(
-      {
-        name: 'stop',
-        label: '/stop',
-        description: t('slash.stop'),
-        busyLabel: '',
-        icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>',
-        type: 'builtin',
-        execute: slashViaWsFactory('stop'),
-      },
-      {
-        name: 'new',
-        label: '/new',
-        description: t('slash.new'),
-        busyLabel: '',
-        icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>',
-        type: 'builtin',
-        execute: slashViaWsFactory('new'),
-      },
-      {
-        name: 'reset',
-        label: '/reset',
-        description: t('slash.reset'),
-        busyLabel: '',
-        icon: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15-6.7L21 8M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16M3 21v-5h5"/></svg>',
-        type: 'builtin',
-        execute: slashViaWsFactory('reset'),
-      },
-    );
-  }
   return list;
 }

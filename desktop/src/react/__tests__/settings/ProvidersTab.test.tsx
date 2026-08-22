@@ -124,4 +124,179 @@ describe('ProvidersTab provider-scoped form state', () => {
     const groqKeyInput = container.querySelector('input[type="password"]');
     expect(groqKeyInput).toHaveValue('');
   });
+
+  it('treats registry-only preset providers as setup entries after deletion', async () => {
+    const registryOnlySummary = {
+      deepseek: providerSummary({
+        display_name: 'DeepSeek',
+        base_url: 'https://api.deepseek.com',
+        models: [],
+        has_credentials: false,
+        can_delete: false,
+        config_status: 'needs_setup',
+        is_configured: false,
+      }),
+    };
+
+    mocks.hanaFetch.mockImplementation((path: string) => {
+      if (path === '/api/providers/summary') {
+        return Promise.resolve(jsonResponse({ providers: registryOnlySummary }));
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    useSettingsStore.setState({
+      providersSummary: registryOnlySummary,
+      selectedProviderId: null,
+      settingsConfig: { providers: {} },
+    });
+
+    render(<ProvidersTab />);
+
+    const deepseekButton = await screen.findByRole('button', { name: /DeepSeek/ });
+    expect(deepseekButton.className).toContain('dim');
+    fireEvent.click(deepseekButton);
+
+    await waitFor(() => {
+      expect(useSettingsStore.getState().selectedProviderId).toBe('deepseek');
+    });
+    expect(screen.queryByRole('button', { name: 'settings.providers.delete' })).not.toBeInTheDocument();
+  });
+
+  it('keeps registry-only non-preset providers visible as setup entries', async () => {
+    const registryOnlySummary = {
+      baichuan: providerSummary({
+        display_name: 'Baichuan',
+        base_url: 'https://api.baichuan-ai.com/v1',
+        models: [],
+        has_credentials: false,
+        can_delete: false,
+        config_status: 'needs_setup',
+        is_configured: false,
+      }),
+    };
+
+    mocks.hanaFetch.mockImplementation((path: string) => {
+      if (path === '/api/providers/summary') {
+        return Promise.resolve(jsonResponse({ providers: registryOnlySummary }));
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    useSettingsStore.setState({
+      providersSummary: registryOnlySummary,
+      selectedProviderId: null,
+      settingsConfig: { providers: {} },
+    });
+
+    render(<ProvidersTab />);
+
+    const baichuanButton = await screen.findByRole('button', { name: /Baichuan/ });
+    expect(baichuanButton.className).toContain('dim');
+    fireEvent.click(baichuanButton);
+
+    await waitFor(() => {
+      expect(useSettingsStore.getState().selectedProviderId).toBe('baichuan');
+    });
+    expect(screen.getByDisplayValue('https://api.baichuan-ai.com/v1')).toBeInTheDocument();
+  });
+
+  it('saves registry-only non-preset providers through the initial setup payload', async () => {
+    const registryOnlySummary = {
+      agnes: providerSummary({
+        display_name: 'Agnes',
+        base_url: 'https://apihub.agnes-ai.com/v1',
+        api: 'openai-completions',
+        models: [],
+        has_credentials: false,
+        can_delete: false,
+        config_status: 'needs_setup',
+        is_configured: false,
+      }),
+    };
+
+    mocks.hanaFetch.mockImplementation((path: string) => {
+      if (path === '/api/providers/summary') {
+        return Promise.resolve(jsonResponse({ providers: registryOnlySummary }));
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    useSettingsStore.setState({
+      providersSummary: registryOnlySummary,
+      selectedProviderId: 'agnes',
+      settingsConfig: { providers: {} },
+    });
+
+    const { container } = render(<ProvidersTab />);
+
+    const input = await waitFor(() => container.querySelector('input[type="password"]') as HTMLInputElement);
+    fireEvent.change(input, { target: { value: 'agnes-key' } });
+    const saveButton = container.querySelector('button[title="settings.providers.verifyConnection"]') as HTMLButtonElement;
+    fireEvent.click(saveButton);
+
+    await waitFor(() => expect(mocks.hanaFetch).toHaveBeenCalledWith(
+      '/api/config',
+      expect.objectContaining({ method: 'PUT' }),
+    ));
+    const configCall = mocks.hanaFetch.mock.calls.find(([path]) => path === '/api/config');
+    expect(JSON.parse(String((configCall?.[1] as RequestInit).body))).toEqual({
+      providers: {
+        agnes: {
+          base_url: 'https://apihub.agnes-ai.com/v1',
+          api_key: 'agnes-key',
+          api: 'openai-completions',
+          seed_default_models: true,
+        },
+      },
+    });
+  });
+
+  it('keeps configured custom providers above setup entries in the API group', async () => {
+    const mixedSummary = {
+      deepseek: providerSummary({
+        display_name: 'DeepSeek',
+        base_url: 'https://api.deepseek.com',
+        has_credentials: true,
+        models: ['deepseek-chat'],
+      }),
+      baichuan: providerSummary({
+        display_name: 'Baichuan',
+        base_url: 'https://api.baichuan-ai.com/v1',
+        is_configured: false,
+      }),
+      'my-proxy': providerSummary({
+        display_name: 'My Proxy',
+        base_url: 'https://proxy.example.com/v1',
+        has_credentials: true,
+        models: ['proxy-chat'],
+        can_delete: true,
+      }),
+    };
+
+    mocks.hanaFetch.mockImplementation((path: string) => {
+      if (path === '/api/providers/summary') {
+        return Promise.resolve(jsonResponse({ providers: mixedSummary }));
+      }
+      return Promise.resolve(jsonResponse({ ok: true }));
+    });
+    useSettingsStore.setState({
+      providersSummary: mixedSummary,
+      selectedProviderId: null,
+      settingsConfig: {
+        providers: {
+          deepseek: { api_key: 'deepseek-key' },
+          'my-proxy': { api_key: 'proxy-key' },
+        },
+      },
+    });
+
+    render(<ProvidersTab />);
+
+    const customButton = await screen.findByRole('button', { name: /My Proxy/ });
+    const unregisteredPresetButton = screen.getByRole('button', { name: /Groq/ });
+    const registrySetupButton = screen.getByRole('button', { name: /Baichuan/ });
+
+    expect(customButton.compareDocumentPosition(unregisteredPresetButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+    expect(customButton.compareDocumentPosition(registrySetupButton) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy();
+  });
 });

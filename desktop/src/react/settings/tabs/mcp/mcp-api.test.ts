@@ -10,7 +10,7 @@ vi.mock('../../api', () => ({
   hanaFetch: (...args: unknown[]) => hanaFetchMock(...args),
 }));
 
-import { addMcpConnector, removeMcpConnector, setMcpEnabled } from './mcp-api';
+import { addMcpConnector, removeMcpConnector, setMcpEnabled, updateMcpConnector } from './mcp-api';
 
 function jsonResponse(body: unknown): Response {
   return { json: async () => body } as Response;
@@ -32,13 +32,13 @@ describe('mcp-api mutations', () => {
     await expect(setMcpEnabled(true)).rejects.toThrow('save failed');
   });
 
-  it('uses the plugin settings namespace for the global enabled endpoint', async () => {
+  it('uses the first-class MCP namespace for the global enabled endpoint', async () => {
     mockMcpResponses(jsonResponse({ enabled: true, connectors: [], agentConfig: { connectors: {} } }));
 
     await setMcpEnabled(true);
 
     expect(hanaFetchMock).toHaveBeenCalledWith(
-      '/api/plugins/mcp/settings/enabled',
+      '/api/mcp/settings/enabled',
       expect.objectContaining({ method: 'PUT' }),
     );
   });
@@ -61,5 +61,31 @@ describe('mcp-api mutations', () => {
       authType: 'none',
     })).rejects.toThrow('add failed');
     await expect(removeMcpConnector('github')).rejects.toThrow('remove failed');
+  });
+
+  it('updates connectors through the first-class MCP connector namespace', async () => {
+    mockMcpResponses(jsonResponse({ connector: { id: 'local' }, state: {} }));
+
+    await updateMcpConnector('local', {
+      name: 'Local',
+      transport: 'stdio',
+      command: 'npx',
+      env: { API_KEY: '********' },
+      enabled: true,
+    });
+
+    expect(hanaFetchMock).toHaveBeenCalledWith(
+      '/api/mcp/connectors/local',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({
+          name: 'Local',
+          transport: 'stdio',
+          command: 'npx',
+          env: { API_KEY: '********' },
+          enabled: true,
+        }),
+      }),
+    );
   });
 });

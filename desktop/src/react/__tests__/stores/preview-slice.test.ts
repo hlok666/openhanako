@@ -12,6 +12,7 @@ import {
   selectActiveTabId,
   selectPinnedViewers,
   selectMarkdownPreviewIds,
+  selectPreviewReadingPositions,
 } from '../../stores/preview-slice';
 import {
   upsertPreviewItem,
@@ -21,10 +22,12 @@ import {
   clearPreview,
   openPreview,
   closePreview,
+  togglePreviewPanel,
   handleLegacyArtifactBlock,
   canSpawnViewer,
   setMarkdownPreviewActive,
   toggleMarkdownPreview,
+  updatePreviewReadingPosition,
 } from '../../stores/preview-actions';
 import type { PreviewItem } from '../../types';
 
@@ -44,7 +47,10 @@ function createTestStore() {
     currentSessionPath: null,
     previewOpen: false,
     setPreviewOpen: (open: boolean) => set({ previewOpen: open }),
+    quoteCandidate: null,
+    quotedSelections: [],
     quotedSelection: null,
+    clearQuoteCandidate: () => set({ quoteCandidate: null }),
     clearQuotedSelection: () => set({ quotedSelection: null }),
   };
 
@@ -55,6 +61,9 @@ function createTestStore() {
 }
 
 let testStore: ReturnType<typeof createTestStore>;
+const layoutMocks = vi.hoisted(() => ({
+  updateLayout: vi.fn(),
+}));
 
 vi.mock('../../stores/index', () => ({
   get useStore() {
@@ -69,7 +78,7 @@ vi.mock('../../stores/index', () => ({
 }));
 
 vi.mock('../../components/SidebarLayout', () => ({
-  updateLayout: () => {},
+  updateLayout: layoutMocks.updateLayout,
 }));
 
 function makePreviewItem(id: string, title?: string): PreviewItem {
@@ -79,6 +88,7 @@ function makePreviewItem(id: string, title?: string): PreviewItem {
 describe('preview slice (user-level content pool)', () => {
   beforeEach(() => {
     testStore = createTestStore();
+    layoutMocks.updateLayout.mockClear();
   });
 
   describe('tab 操作', () => {
@@ -128,6 +138,13 @@ describe('preview slice (user-level content pool)', () => {
       setMarkdownPreviewActive('a1', true);
       closeTab('a1');
       expect(selectMarkdownPreviewIds(testStore.getState())).toEqual([]);
+    });
+
+    it('closeTab 同步清理该 tab 的阅读位置', () => {
+      openTab('a1');
+      updatePreviewReadingPosition('a1', 'preview', { scrollTop: 120, ratio: 0.5 });
+      closeTab('a1');
+      expect(selectPreviewReadingPositions(testStore.getState())).toEqual({});
     });
 
     it('setActiveTab 切换激活', () => {
@@ -200,6 +217,38 @@ describe('preview slice (user-level content pool)', () => {
       expect(selectOpenTabs(testStore.getState())).toEqual([]);
       expect(selectActiveTabId(testStore.getState())).toBeNull();
       expect(selectMarkdownPreviewIds(testStore.getState())).toEqual([]);
+      expect(selectPreviewReadingPositions(testStore.getState())).toEqual({});
+    });
+  });
+
+  describe('reading position', () => {
+    it('records per-tab preview and edit scroll snapshots without using global focus', () => {
+      updatePreviewReadingPosition('file-a', 'preview', {
+        scrollTop: 300,
+        scrollHeight: 1200,
+        clientHeight: 600,
+        ratio: 0.5,
+        anchorId: 'intro',
+        contentHash: 'hash',
+      }, { id: 'intro', text: 'Intro' });
+      updatePreviewReadingPosition('file-a', 'edit', { scrollTop: 88 });
+
+      expect(selectPreviewReadingPositions(testStore.getState())).toMatchObject({
+        'file-a': {
+          preview: {
+            scrollTop: 300,
+            ratio: 0.5,
+            anchorId: 'intro',
+            contentHash: 'hash',
+          },
+          edit: {
+            scrollTop: 88,
+          },
+          currentHeadingId: 'intro',
+          currentHeadingText: 'Intro',
+          contentHash: 'hash',
+        },
+      });
     });
   });
 
@@ -241,6 +290,24 @@ describe('preview slice (user-level content pool)', () => {
       expect(testStore.getState().previewOpen).toBe(false);
       expect(selectOpenTabs(testStore.getState())).toEqual(['p1']);
       expect(selectPreviewItems(testStore.getState())).toEqual([a]);
+    });
+
+    it('togglePreviewPanel 只切换面板可见状态并刷新布局', () => {
+      const a = makePreviewItem('p1');
+      upsertPreviewItem(a);
+      openTab(a.id);
+
+      togglePreviewPanel();
+      expect(testStore.getState().previewOpen).toBe(true);
+      expect(selectOpenTabs(testStore.getState())).toEqual(['p1']);
+      expect(selectPreviewItems(testStore.getState())).toEqual([a]);
+      expect(layoutMocks.updateLayout).toHaveBeenCalledTimes(1);
+
+      togglePreviewPanel();
+      expect(testStore.getState().previewOpen).toBe(false);
+      expect(selectOpenTabs(testStore.getState())).toEqual(['p1']);
+      expect(selectPreviewItems(testStore.getState())).toEqual([a]);
+      expect(layoutMocks.updateLayout).toHaveBeenCalledTimes(2);
     });
   });
 

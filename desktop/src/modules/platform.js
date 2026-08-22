@@ -15,8 +15,31 @@
 
   // Web / 非 Electron 环境 — HTTP fallback
   const params = new URLSearchParams(location.search);
+  const devWeb = normalizeDevWebConfig(window.__HANA_DEV_WEB__);
   const token = params.get("token") || localStorage.getItem("hana-token") || "";
-  const baseUrl = `${location.protocol}//${location.host}`;
+  const baseUrl = devWeb.apiBaseUrl || `${location.protocol}//${location.host}`;
+  const serverPort = devWeb.serverPort || safePortFromBaseUrl(baseUrl) || location.port || "3000";
+
+  function normalizeDevWebConfig(value) {
+    if (!value || typeof value !== "object") {
+      return { serverPort: "", apiBaseUrl: "" };
+    }
+    const serverPort = typeof value.serverPort === "number" || typeof value.serverPort === "string"
+      ? String(value.serverPort).trim()
+      : "";
+    const apiBaseUrl = typeof value.apiBaseUrl === "string"
+      ? value.apiBaseUrl.replace(/\/+$/, "")
+      : "";
+    return { serverPort, apiBaseUrl };
+  }
+
+  function safePortFromBaseUrl(value) {
+    try {
+      return new URL(value).port;
+    } catch {
+      return "";
+    }
+  }
 
   function apiFetch(path, opts = {}) {
     const headers = { ...opts.headers };
@@ -26,9 +49,10 @@
 
   window.platform = {
     // 服务器连接
-    getServerPort: async () => location.port || "3000",
+    getServerPort: async () => serverPort,
     getServerToken: async () => token,
     appReady: async () => {},
+    syncWindowTheme: () => {},
     runEditCommand: async () => false,
 
     // 文件 I/O → server HTTP
@@ -40,12 +64,17 @@
 
     // 文件写入 / 监听 / 派生 viewer 窗口 → Web 不支持
     writeFile: async () => false,
+    writeFileBinary: async () => false,
+    copyFile: async () => false,
     writeFileIfUnchanged: async () => ({ ok: false }),
     watchFile: async () => false,
     unwatchFile: async () => false,
     onFileChanged: () => {},
+    watchWorkspace: async () => false,
+    unwatchWorkspace: async () => false,
+    onWorkspaceChanged: () => {},
     spawnViewer: async () => null,
-    onViewerLoad: () => {},
+    viewerRequestLoad: async () => null,
     viewerClose: () => {},
     onViewerClosed: () => {},
 
@@ -83,6 +112,9 @@
     browserGoBack: () => {},
     browserGoForward: () => {},
     browserReload: () => {},
+    browserNewTab: () => {},
+    browserSwitchTab: () => {},
+    browserCloseTab: () => {},
     browserEmergencyStop: () => {},
 
     // Skill 查看器 → Web 环境暂不支持
@@ -113,5 +145,22 @@
   if (!p?.getPlatform) return;
   const plat = await p.getPlatform();
   document.documentElement.setAttribute("data-platform", plat);
+  if (plat === "win32") {
+    const scrollIdleTimers = new WeakMap();
+    document.addEventListener("scroll", (event) => {
+      if (document.documentElement.getAttribute("data-platform") !== "win32") return;
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+
+      target.classList.add("hana-scroll-active");
+      const previousTimer = scrollIdleTimers.get(target);
+      if (previousTimer) clearTimeout(previousTimer);
+      const nextTimer = setTimeout(() => {
+        target.classList.remove("hana-scroll-active");
+        scrollIdleTimers.delete(target);
+      }, 800);
+      scrollIdleTimers.set(target, nextTimer);
+    }, { capture: true, passive: true });
+  }
   // Windows/Linux 窗口控制按钮已迁移到 React (App.tsx WindowControls)
 })();

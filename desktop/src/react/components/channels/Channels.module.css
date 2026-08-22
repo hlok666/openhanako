@@ -22,8 +22,8 @@
     border-radius: var(--radius-sm);
     background: var(--tab-slider-bg, var(--bg-card));
     box-shadow: var(--tab-slider-shadow, 0 1px 3px var(--shadow));
-    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1),
-                width 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: transform var(--duration-slow) cubic-bezier(0.4, 0, 0.2, 1),
+                width var(--duration-slow) cubic-bezier(0.4, 0, 0.2, 1);
     z-index: 0;
 }
 
@@ -36,10 +36,10 @@
     background: transparent;
     color: var(--text-muted);
     font-family: var(--font-ui);
-    font-size: 0.78rem;
+    font-size: var(--fs-caption);
     font-weight: 500;
-    cursor: pointer;
-    transition: color 0.2s var(--ease-out);
+    cursor: default;
+    transition: color var(--duration-fast) var(--ease-out);
     display: flex;
     align-items: center;
     gap: 6px;
@@ -90,7 +90,7 @@
 .channelList {
     flex: 1;
     overflow-y: auto;
-    padding: 0 var(--space-sm) 42px;
+    padding: 0 var(--space-8) 42px;
 }
 
 .channelDisabledOverlay {
@@ -105,13 +105,24 @@
 }
 
 .channelDisabledOverlay span {
-    font-size: 0.82rem;
+    font-size: var(--fs-ui);
     color: var(--text-muted);
     letter-spacing: 0.03em;
 }
 
 .channelDisabledOverlayHidden {
     display: none;
+}
+
+.channelExportDescription {
+    margin-bottom: var(--space-12);
+    color: var(--text-muted);
+    font-size: var(--fs-caption);
+    line-height: 1.6;
+}
+
+.channelExportButton {
+    width: 100%;
 }
 
 .btnDisabled {
@@ -127,24 +138,24 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 12px;
+    padding: var(--space-8) var(--space-12);
     background: var(--bg);
     border-top: 1px solid var(--overlay-light);
     z-index: 6;
 }
 
 .channelToggleBarLabel {
-    font-size: 0.72rem;
+    font-size: var(--fs-hint);
     color: var(--text-muted);
     letter-spacing: 0.02em;
 }
 
 .channelSectionLabel {
-    font-size: 0.68rem;
+    font-size: var(--fs-hint);
     font-weight: 600;
     color: var(--text-muted);
     letter-spacing: 0.04em;
-    padding: 12px 12px 4px;
+    padding: var(--space-12) var(--space-12) var(--space-4);
     user-select: none;
     display: flex;
     align-items: baseline;
@@ -160,12 +171,12 @@
 .channelItem {
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
-    padding: 8px var(--space-sm);
+    gap: var(--space-8);
+    padding: 8px var(--space-8);
     margin-bottom: 1px;
     border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: background 0.15s;
+    cursor: default;
+    transition: background var(--duration-fast);
 }
 
 .channelItem:hover {
@@ -184,7 +195,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.75rem;
+    font-size: var(--fs-caption);
     flex-shrink: 0;
     color: var(--text-muted);
 }
@@ -240,7 +251,7 @@
 }
 
 .channelItemName {
-    font-size: 0.85rem;
+    font-size: var(--fs-ui);
     font-weight: 500;
     color: var(--text);
     white-space: nowrap;
@@ -249,7 +260,7 @@
 }
 
 .channelItemPreview {
-    font-size: 0.72rem;
+    font-size: var(--fs-hint);
     color: var(--text-muted);
     white-space: nowrap;
     overflow: hidden;
@@ -265,7 +276,7 @@
 }
 
 .channelItemTime {
-    font-size: 0.65rem;
+    font-size: var(--fs-hint);
     color: var(--text-muted);
 }
 
@@ -290,8 +301,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px var(--space-lg);
-    padding-top: 60px;
+    padding: var(--space-12) var(--space-24);
     border-bottom: 1px solid var(--overlay-light);
     flex-shrink: 0;
 }
@@ -303,13 +313,13 @@
 }
 
 .channelHeaderName {
-    font-size: 0.95rem;
+    font-size: var(--fs-title);
     font-weight: 600;
     color: var(--text);
 }
 
 .channelHeaderMembers {
-    font-size: 0.72rem;
+    font-size: var(--fs-hint);
     color: var(--text-muted);
 }
 
@@ -323,10 +333,10 @@
     background: none;
     border: none;
     color: var(--text-muted);
-    cursor: pointer;
+    cursor: default;
     padding: 4px;
     border-radius: var(--radius-sm);
-    transition: background 0.15s, color 0.15s;
+    transition: background var(--duration-fast), color var(--duration-fast);
 }
 
 .channelHeaderActionBtn:hover {
@@ -361,7 +371,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 0.7rem;
+    font-size: var(--fs-hint);
     font-weight: 600;
     color: var(--accent);
     flex-shrink: 0;
@@ -389,18 +399,18 @@
 }
 
 .channelMsgSender {
-    font-size: 0.82rem;
+    font-size: var(--fs-ui);
     font-weight: 600;
     color: var(--text);
 }
 
 .channelMsgTime {
-    font-size: 0.65rem;
+    font-size: var(--fs-hint);
     color: var(--text-muted);
 }
 
 .channelMsgText {
-    font-size: 0.88rem;
+    font-size: var(--fs-body);
     color: var(--text);
     line-height: 1.6;
     word-break: break-word;
@@ -419,7 +429,7 @@
 /* 他人消息：左侧气泡 */
 .channelMsg:not(.channelMsgSelf) .channelMsgText {
     background: var(--overlay-light);
-    padding: 8px 12px;
+    padding: var(--space-8) var(--space-12);
     border-radius: 14px 14px 14px 2px;
     display: inline-block;
     max-width: 70%;
@@ -438,7 +448,7 @@
 
 .channelMsgSelf .channelMsgText {
     background: rgba(var(--accent-rgb), 0.1);
-    padding: 8px 12px;
+    padding: var(--space-8) var(--space-12);
     border-radius: 14px 14px 2px 14px;
     display: inline-block;
     max-width: 70%;
@@ -448,11 +458,35 @@
     flex-direction: row-reverse;
 }
 
+.channelNewMessagesBtn {
+    position: sticky;
+    bottom: var(--space-12);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: fit-content;
+    margin-top: var(--space-8);
+    padding: var(--space-6) var(--space-12);
+    border: 1px solid rgba(var(--accent-rgb), 0.18);
+    border-radius: var(--radius-sm);
+    background: var(--bg-card);
+    color: var(--accent);
+    box-shadow: 0 4px 14px var(--shadow);
+    font-size: var(--fs-caption);
+    cursor: default;
+    z-index: 2;
+}
+
+.channelNewMessagesBtn:hover {
+    background: rgba(var(--accent-rgb), 0.08);
+}
+
 /* ── 频道输入区 ── */
 .channelInputWrapper {
     display: flex;
     align-items: flex-end;
-    gap: var(--space-sm);
+    gap: var(--space-8);
     max-width: 646px;
     margin-left: auto;
     margin-right: auto;
@@ -460,7 +494,7 @@
     background: var(--bg-card);
     border: 1px solid rgba(var(--accent-rgb), 0.12);
     border-radius: var(--radius-lg);
-    padding: var(--space-sm) var(--space-sm) var(--space-sm) var(--space-md);
+    padding: var(--space-8) var(--space-8) var(--space-8) var(--space-16);
     box-shadow: 0 2px 6px var(--shadow);
     transition: border-color 0.5s var(--ease-out),
                 box-shadow 0.5s var(--ease-out);
@@ -490,12 +524,12 @@
 .channelMentionItem {
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
-    padding: 6px 12px;
-    cursor: pointer;
+    gap: var(--space-8);
+    padding: var(--space-6) var(--space-12);
+    cursor: default;
     font-size: 13px;
     color: var(--text-primary);
-    transition: background 0.1s;
+    transition: background var(--duration-instant);
 }
 
 .channelMentionItem:hover,
@@ -529,7 +563,7 @@
     border: none;
     padding: 4px 0;
     font-family: inherit;
-    font-size: 0.95rem;
+    font-size: var(--fs-title);
     line-height: 1.6;
     background: none;
     color: var(--text);
@@ -538,7 +572,7 @@
     overflow-y: auto;
     scrollbar-width: none;
     line-height: 1.5;
-    transition: border-color 0.15s;
+    transition: border-color var(--duration-fast);
 }
 
 .channelInputBox::-webkit-scrollbar {
@@ -559,10 +593,10 @@
     color: white;
     border: 1px solid var(--accent);
     border-radius: var(--radius-sm);
-    cursor: pointer;
-    transition: all var(--duration) var(--ease-out);
+    cursor: default;
+    transition: all var(--duration-slow) var(--ease-out);
     flex-shrink: 0;
-    transition: opacity 0.15s;
+    transition: opacity var(--duration-fast);
 }
 
 .channelSendBtn:disabled {
@@ -577,7 +611,7 @@
     align-items: center;
     justify-content: center;
     color: var(--text-muted);
-    font-size: 0.85rem;
+    font-size: var(--fs-ui);
 }
 
 /* ========================================
@@ -602,17 +636,17 @@
 .createCard {
     background: var(--bg-card);
     border-radius: var(--radius-lg);
-    padding: var(--space-lg);
+    padding: var(--space-24);
     width: 440px;
     max-width: 90vw;
     box-shadow: 0 12px 48px var(--shadow);
-    animation: dropdown-in 0.2s var(--ease-out);
+    animation: hana-fade-up var(--duration-fast) var(--ease-out);
 }
 
 .createTitle {
-    font-size: 0.95rem;
+    font-size: var(--fs-title);
     font-weight: 500;
-    margin-bottom: var(--space-md);
+    margin-bottom: var(--space-16);
     color: var(--text);
 }
 
@@ -620,18 +654,18 @@
     display: flex;
     flex-direction: column;
     gap: 3px;
-    margin-bottom: var(--space-md);
+    margin-bottom: var(--space-16);
 }
 
 .createFieldLabel {
-    font-size: 0.82rem;
+    font-size: var(--fs-ui);
     color: var(--text-light);
     font-weight: 600;
 }
 
 .createInput {
     font-family: inherit;
-    font-size: 0.85rem;
+    font-size: var(--fs-ui);
     color: var(--text);
     background: var(--bg-card);
     border: none;
@@ -639,7 +673,7 @@
     padding: 0.45rem 0.65rem;
     outline: none;
     box-shadow: 0 1px 3px var(--shadow);
-    transition: box-shadow var(--duration) var(--ease-out);
+    transition: box-shadow var(--duration-slow) var(--ease-out);
     width: 100%;
 }
 
@@ -654,8 +688,8 @@
 .createActions {
     display: flex;
     justify-content: flex-end;
-    gap: var(--space-sm);
-    margin-top: var(--space-md);
+    gap: var(--space-8);
+    margin-top: var(--space-16);
 }
 
 .createCancel,
@@ -664,9 +698,9 @@
     border-radius: var(--radius-md);
     border: none;
     font-family: inherit;
-    font-size: 0.82rem;
-    cursor: pointer;
-    transition: all 0.2s var(--ease-out);
+    font-size: var(--fs-ui);
+    cursor: default;
+    transition: all var(--duration-fast) var(--ease-out);
 }
 
 .createCancel {
@@ -687,6 +721,22 @@
     background: var(--accent-hover);
 }
 
+.createConfirm:disabled {
+    opacity: 0.45;
+    cursor: default;
+}
+
+.createConfirm:disabled:hover {
+    background: var(--accent);
+}
+
+.createError {
+    color: var(--danger, #b45757);
+    font-size: var(--fs-caption);
+    line-height: 1.35;
+    margin-top: 4px;
+}
+
 /* ── 成员选择器 ── */
 .channelCreateMembers {
     display: flex;
@@ -704,9 +754,9 @@
     background: none;
     color: var(--text-light);
     font-family: var(--font-ui);
-    font-size: 0.78rem;
-    cursor: pointer;
-    transition: all 0.15s var(--ease-out);
+    font-size: var(--fs-caption);
+    cursor: default;
+    transition: all var(--duration-fast) var(--ease-out);
 }
 
 .channelCreateMemberChip:hover {
@@ -755,7 +805,7 @@
 .channelMemberItem {
     display: flex;
     align-items: center;
-    gap: var(--space-sm);
+    gap: var(--space-8);
     padding: 4px 0;
 }
 
@@ -781,6 +831,384 @@
 }
 
 .channelMemberName {
-    font-size: 0.82rem;
+    flex: 1;
+    min-width: 0;
+    font-size: var(--fs-ui);
     color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.channelMemberRemoveButton {
+    width: 20px;
+    height: 20px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-subtle);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: default;
+    opacity: 0.62;
+}
+
+.channelMemberRemoveButton:hover:not(:disabled) {
+    background: rgba(0, 0, 0, 0.04);
+    color: var(--danger, #b45757);
+    opacity: 1;
+}
+
+.channelMemberRemoveButton:disabled {
+    cursor: default;
+    opacity: 0.25;
+}
+
+.channelMemberAddButton {
+    width: 100%;
+    min-height: 26px;
+    margin-top: 4px;
+    padding: 0 7px;
+    border: 1px dashed rgba(0, 0, 0, 0.09);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.26);
+    color: var(--text-muted);
+    font-size: var(--fs-caption);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    cursor: default;
+}
+
+.channelMemberAddButton:hover:not(:disabled) {
+    background: rgba(255, 255, 255, 0.46);
+    color: var(--text);
+}
+
+.channelMemberAddButton:disabled {
+    cursor: default;
+    opacity: 0.55;
+}
+
+/* ========================================
+   频道 — Agent 动态
+   ======================================== */
+.agentActivityList {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.agentActivityHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: var(--space-8);
+}
+
+.agentActivityHeader :global(.channel-info-label) {
+    margin-bottom: 0;
+}
+
+.agentActivityScheduler {
+    margin: -2px 0 8px;
+    color: var(--text-muted);
+    font-size: var(--fs-hint);
+    line-height: 1.4;
+}
+
+.agentSettingsHeader {
+    margin-bottom: var(--space-8);
+}
+
+.agentToolModeToggle {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px;
+    border: 1px solid rgba(0, 0, 0, 0.07);
+    border-radius: 6px;
+    background: rgba(0, 0, 0, 0.025);
+}
+
+.agentToolModeToggleFill {
+    width: 100%;
+}
+
+.agentToolModeToggleFill .agentToolModeButton {
+    flex: 1;
+}
+
+.agentToolModeButton {
+    min-width: 34px;
+    height: 22px;
+    padding: 0 6px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: var(--fs-hint);
+    cursor: default;
+}
+
+.agentToolModeButton:disabled {
+    cursor: default;
+    opacity: 0.58;
+}
+
+.agentToolModeButtonActive {
+    background: var(--bg-card);
+    color: var(--text);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+
+.agentActivityItem {
+    border: 1px solid rgba(0, 0, 0, 0.06);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.34);
+    overflow: hidden;
+}
+
+.agentActivityRow {
+    width: 100%;
+    min-height: 34px;
+    padding: 6px 8px;
+    display: grid;
+    grid-template-columns: 20px minmax(48px, max-content) minmax(0, 1fr);
+    gap: 7px;
+    align-items: center;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    cursor: default;
+}
+
+.agentActivityRow:hover {
+    background: rgba(0, 0, 0, 0.025);
+}
+
+.agentActivityAvatar {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    overflow: hidden;
+    background: var(--overlay-light);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent);
+    font-size: 0.58rem;
+    font-weight: 600;
+}
+
+.agentActivityAvatarImg {
+    width: 20px;
+    height: 20px;
+    object-fit: cover;
+    border-radius: 50%;
+}
+
+.agentActivityName {
+    font-size: var(--fs-caption);
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agentActivitySummary {
+    min-width: 0;
+    font-size: var(--fs-caption);
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.agentActivityDetails {
+    border-top: 1px solid rgba(0, 0, 0, 0.045);
+}
+
+.agentActivityTranscriptScroll {
+    max-height: 11.5rem;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 6px 7px 7px;
+    font-size: var(--fs-caption);
+}
+
+.agentActivityTranscriptScroll :global(.message) {
+    max-width: 100%;
+}
+
+.agentActivityTranscriptScroll :global(.messageAssistant),
+.agentActivityTranscriptScroll :global(.messageUser) {
+    font-size: var(--fs-caption);
+}
+
+.agentActivityEmpty {
+    color: var(--text-muted);
+    font-size: var(--fs-hint);
+    padding: 2px 0;
+}
+
+/* ========================================
+   频道 — 当前群聊 Agent 设置
+   ======================================== */
+.agentSettingsCard {
+    position: relative;
+    z-index: 40;
+    overflow: visible;
+}
+
+.agentSettingsInlineGrid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 8px;
+}
+
+.agentSettingsInlineGrid .agentSettingsField {
+    margin-top: 0;
+}
+
+.agentSettingsInlineGridSpaced {
+    margin-top: 10px;
+}
+
+.agentSettingsField {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    margin-top: 10px;
+}
+
+.agentSettingsField:first-of-type {
+    margin-top: 0;
+}
+
+.agentSettingsLabel {
+    font-size: var(--fs-hint);
+    color: var(--text-muted);
+}
+
+.agentReplyRangeRow {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1fr);
+    align-items: center;
+    gap: 5px;
+}
+
+.agentReplyRangeInput {
+    width: 100%;
+    height: 26px;
+    border: 1px solid rgba(0, 0, 0, 0.07);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.34);
+    color: var(--text);
+    font-size: var(--fs-hint);
+    padding: 0 7px;
+    outline: none;
+}
+
+.agentReplyRangeSep {
+    color: var(--text-muted);
+    font-size: var(--fs-hint);
+    text-align: center;
+}
+
+.agentReplyRangeInput:focus {
+    border-color: rgba(47, 111, 143, 0.28);
+    background: rgba(255, 255, 255, 0.5);
+}
+
+.agentModelOverrideRow {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+}
+
+.agentModelSelect {
+    position: relative;
+    min-width: 0;
+}
+
+.agentModelSelectButton {
+    width: 100%;
+    height: 26px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid rgba(0, 0, 0, 0.07);
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.34);
+    color: var(--text);
+    font-size: var(--fs-hint);
+    padding: 0 7px;
+    cursor: default;
+}
+
+.agentModelSelectButton:disabled {
+    opacity: 0.55;
+    cursor: default;
+}
+
+.agentModelSelectButton span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.agentModelSelectArrow {
+    color: var(--text-muted);
+    font-size: 0.62rem;
+}
+
+.agentModelDropdown {
+    position: absolute;
+    z-index: 1000;
+    right: 0;
+    top: calc(100% + 4px);
+    width: min(240px, 72vw);
+    max-height: 220px;
+    overflow-y: auto;
+    padding: 4px;
+    border: 1px solid rgba(0, 0, 0, 0.08);
+    border-radius: 7px;
+    background: var(--bg-card);
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+}
+
+.agentModelGroupHeader {
+    padding: 5px 7px 3px;
+    color: var(--text-muted);
+    font-size: 0.62rem;
+    letter-spacing: 0.02em;
+}
+
+.agentModelOption {
+    width: 100%;
+    min-height: 26px;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--text);
+    font-size: var(--fs-hint);
+    text-align: left;
+    padding: 5px 7px;
+    cursor: default;
+}
+
+.agentModelOption:hover {
+    background: rgba(0, 0, 0, 0.045);
+}
+
+.agentModelOptionActive {
+    background: rgba(47, 111, 143, 0.1);
+    color: var(--accent);
 }

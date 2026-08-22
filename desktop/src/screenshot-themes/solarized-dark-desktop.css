@@ -34,13 +34,13 @@ html {
 }
 
 body {
-  font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "Lora", "Georgia", serif;
+  font-family: var(--screenshot-font-family, "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", "STSong", "Lora", "Georgia", serif);
   font-size: 1rem;
   line-height: 1.75;
   color: #a8b5b7;
   background-color: var(--base03);
-  padding: 2rem 3rem;
-  max-width: 800px;
+  padding: 2rem 2.25rem;
+  max-width: 832px;
   margin: 0 auto;
 }
 
@@ -131,17 +131,31 @@ pre code {
 .hljs-variable { color: var(--orange); }
 .hljs-type { color: var(--yellow); }
 
+.markdown-table-scroll {
+  max-width: 100%;
+  margin: 1.5em 0;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
   margin: 1.5em 0;
   font-size: 0.95em;
+  table-layout: fixed;
+}
+
+.markdown-table-scroll > table {
+  margin: 0;
+  table-layout: fixed;
 }
 
 th, td {
   border: 1px solid var(--base01);
   padding: 0.6em 1em;
   text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 th {
@@ -165,6 +179,15 @@ img {
 
 strong { font-weight: 600; color: var(--base1); }
 em { font-style: italic; }
+
+/* Task Lists */
+.task-list-item {
+  list-style-type: none;
+}
+.task-list-item-checkbox {
+  margin-right: 0.5em;
+  vertical-align: middle;
+}
 
 /* Conversation Mode */
 .chat-user {

@@ -1,20 +1,23 @@
 import React, { useEffect, useRef } from "react";
 import { t, autoSaveConfig } from "../../helpers";
-import { Toggle } from "../../widgets/Toggle";
+import { Toggle } from "@/ui";
 import { SettingsSection } from "../../components/SettingsSection";
 import { SettingsRow } from "../../components/SettingsRow";
 
 // Local copy of OPTIONAL_TOOL_NAMES. Frontend intentionally does NOT import
-// from shared/tool-categories.js to keep the desktop bundle independent of
+// from shared/tool-categories.ts to keep the desktop bundle independent of
 // node-only server code. Drift between this constant and the backend's
-// shared/tool-categories.js is caught by tests/optional-tool-names-drift.test.js
+// shared/tool-categories.ts is caught by tests/optional-tool-names-drift.test.ts
 // (Task 10b) which imports both and asserts equality.
 const OPTIONAL_TOOL_NAMES = [
+  "automation",
+  "beautify",
   "browser",
-  "cron",
-  "dm",
   "install_skill",
+  "office",
+  "session",
   "update_settings",
+  "workflow",
 ] as const;
 
 type OptionalToolName = (typeof OPTIONAL_TOOL_NAMES)[number];
@@ -26,13 +29,11 @@ function normalizeDisabledTools(disabled: string[]) {
 
 interface Props {
   availableTools?: string[];
-  disabled: string[];
+  disabled?: string[];
 }
 
 export function AgentToolsSection({ availableTools, disabled }: Props) {
   // Only render rows for tools the agent actually has registered.
-  // This naturally hides dm in single-agent environments where the agent
-  // has no channelsDir/agentsDir wiring.
   // If the field is absent (old backend / config still loading), render the
   // built-in optional list. An explicit [] still means "no optional tools".
   const renderable = Array.isArray(availableTools)
@@ -47,13 +48,14 @@ export function AgentToolsSection({ availableTools, disabled }: Props) {
   // by prop sync below and optimistically after each toggleTool call) so
   // two consecutive toggles on different tools before the first PUT+GET
   // round-trip both survive.
-  const normalizedDisabled = normalizeDisabledTools(disabled);
+  const normalizedDisabled = disabled ? normalizeDisabledTools(disabled) : undefined;
   const disabledRef = useRef(normalizedDisabled);
   useEffect(() => {
     disabledRef.current = normalizedDisabled;
   }, [normalizedDisabled]);
 
   const toggleTool = (name: OptionalToolName) => {
+    if (!disabledRef.current) return;
     const current = disabledRef.current;
     const currentlyOff = current.includes(name);
     const newDisabled = currentlyOff
@@ -68,12 +70,13 @@ export function AgentToolsSection({ availableTools, disabled }: Props) {
   }
 
   return (
-    <SettingsSection title={t("settings.agent.tools.title")}>
-      <SettingsSection.Note>
-        {t("settings.agent.tools.description")}
-      </SettingsSection.Note>
+    <SettingsSection
+      variant="list"
+      title={t("settings.agent.tools.title")}
+      description={t("settings.agent.tools.description")}
+    >
       {renderable.map((name) => {
-        const isOn = !normalizedDisabled.includes(name);
+        const isOn = normalizedDisabled ? !normalizedDisabled.includes(name) : undefined;
         return (
           <SettingsRow
             key={name}

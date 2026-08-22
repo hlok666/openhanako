@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useRef, useCallback, useState } from 'react';
 import { useSettingsStore, type Agent } from '../../store';
 import { hanaFetch, hanaUrl, yuanFallbackAvatar } from '../../api';
 import { t } from '../../helpers';
@@ -38,49 +38,63 @@ export function calculateAgentCardGeometry(totalCards: number): AgentCardGeometr
   };
 }
 
-export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, onAvatarClick, onSetActive, onDelete, onAdd }: {
+export function calculateNearestRevealScrollLeft({
+  scrollLeft,
+  viewportWidth,
+  itemLeft,
+  itemRight,
+  edgePadding,
+  maxScrollLeft,
+}: {
+  scrollLeft: number;
+  viewportWidth: number;
+  itemLeft: number;
+  itemRight: number;
+  edgePadding: number;
+  maxScrollLeft: number;
+}): number {
+  const visibleLeft = scrollLeft + edgePadding;
+  const visibleRight = scrollLeft + viewportWidth - edgePadding;
+  let next = scrollLeft;
+  if (itemLeft < visibleLeft) {
+    next = itemLeft - edgePadding;
+  } else if (itemRight > visibleRight) {
+    next = itemRight - (viewportWidth - edgePadding);
+  }
+  return Math.min(Math.max(0, next), Math.max(0, maxScrollLeft));
+}
+
+export function AgentCardStack({
+  agents,
+  selectedId,
+  onSelect,
+  onAvatarClick,
+  onSetPrimary,
+  onDelete,
+  onExport,
+  onAdd,
+  exportingAgentId = null,
+}: {
   agents: Agent[];
   selectedId: string | null;
   currentAgentId: string | null;
   onSelect: (id: string) => void;
   onAvatarClick: () => void;
-  onSetActive: (id: string) => void;
+  onSetPrimary: (id: string) => void;
   onDelete: (id: string) => void;
+  onExport: (id: string) => void;
   onAdd: () => void;
+  exportingAgentId?: string | null;
 }) {
   const cardsRef = useRef<HTMLDivElement>(null);
+  const [pointerInside, setPointerInside] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const expanded = pointerInside || focusWithin || dragActive;
+  const expandedRef = useRef(false);
+  const expandedScrollLeftRef = useRef(0);
   const agentsRef = useRef(agents);
   agentsRef.current = agents;
-
-  // Wheel 在本区域内只用于左右翻卡，永远不传穿透到外层触发页面纵向滚动
-  useEffect(() => {
-    const el = cardsRef.current;
-    if (!el) return;
-    const handler = (e: WheelEvent) => {
-      e.preventDefault();
-      if (el.scrollWidth <= el.clientWidth) return;
-      el.scrollLeft += e.deltaY;
-    };
-    el.addEventListener('wheel', handler, { passive: false });
-    return () => el.removeEventListener('wheel', handler);
-  }, []);
-
-  useEffect(() => {
-    if (!selectedId) return;
-    const el = cardsRef.current;
-    if (!el || el.scrollWidth <= el.clientWidth) return;
-    const card = el.querySelector(`[data-agent-id="${selectedId}"]`) as HTMLElement;
-    if (!card) return;
-    const containerRect = el.getBoundingClientRect();
-    const cardRect = card.getBoundingClientRect();
-    const cardVisLeft = cardRect.left - containerRect.left + el.scrollLeft;
-    const cardVisRight = cardVisLeft + cardRect.width;
-    const visLeft = el.scrollLeft;
-    const visRight = visLeft + el.clientWidth;
-    if (cardVisLeft < visLeft || cardVisRight > visRight) {
-      el.scrollLeft = cardVisLeft - (el.clientWidth - cardRect.width) / 2;
-    }
-  }, [selectedId]);
 
   // 总卡片数 = agents + 1 (add 按钮)
   const total = agents.length + 1;
@@ -89,7 +103,57 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
   const cardGeometry = calculateAgentCardGeometry(total);
   const spreadStep = cardGeometry.spreadStep;
   const spreadWidth = cardGeometry.spreadWidth;
-  const ts = Date.now();
+
+  // Wheel 只在展开态归本组件所有；收起态交还页面滚动，避免旧 scrollLeft 影响弧形堆叠。
+  useEffect(() => {
+    const el = cardsRef.current;
+    if (!el) return;
+    const handler = (e: WheelEvent) => {
+      if (!expanded) return;
+      e.preventDefault();
+      if (el.scrollWidth <= el.clientWidth) return;
+      el.scrollLeft += e.deltaY;
+    };
+    el.addEventListener('wheel', handler, { passive: false });
+    return () => el.removeEventListener('wheel', handler);
+  }, [expanded]);
+
+  useLayoutEffect(() => {
+    const el = cardsRef.current;
+    if (!el) return;
+
+    if (!expanded) {
+      if (expandedRef.current) {
+        expandedScrollLeftRef.current = el.scrollLeft;
+      }
+      // Compact fan geometry is positioned relative to scroll origin. Keep
+      // the expanded viewport in a ref while the collapsed DOM sits at zero.
+      el.scrollLeft = 0;
+      expandedRef.current = false;
+      return;
+    }
+
+    if (!expandedRef.current) {
+      el.scrollLeft = expandedScrollLeftRef.current;
+    }
+    expandedRef.current = true;
+    if (!selectedId) return;
+    if (el.scrollWidth <= el.clientWidth) return;
+    const card = el.querySelector(`[data-agent-id="${selectedId}"]`) as HTMLElement;
+    if (!card) return;
+    const containerRect = el.getBoundingClientRect();
+    const cardRect = card.getBoundingClientRect();
+    const cardVisLeft = cardRect.left - containerRect.left + el.scrollLeft;
+    const cardVisRight = cardVisLeft + cardRect.width;
+    el.scrollLeft = calculateNearestRevealScrollLeft({
+      scrollLeft: el.scrollLeft,
+      viewportWidth: el.clientWidth,
+      itemLeft: cardVisLeft,
+      itemRight: cardVisRight,
+      edgePadding: cardGeometry.edgeBleed,
+      maxScrollLeft: el.scrollWidth - el.clientWidth,
+    });
+  }, [expanded, selectedId, cardGeometry.edgeBleed]);
 
   // 拖拽排序（只对 agent 卡片，排除最后的 add 按钮）
   useEffect(() => {
@@ -97,6 +161,7 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
     if (!container) return;
 
     const handlers: Array<[HTMLElement, (e: PointerEvent) => void]> = [];
+    const activeDragCleanups = new Set<() => void>();
 
     const cards = [...container.children] as HTMLElement[];
     // 只给 agent 卡片（非 add 按钮、非 spacer）绑定拖拽
@@ -114,6 +179,7 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
         const startY = e.clientY;
         let moved = false;
         let dropIdx = dragIdx;
+        let finished = false;
 
         const allCards = ([...container.children] as HTMLElement[]).filter(c => !c.dataset.spacer);
         const positions = allCards.map(c => parseFloat(c.style.getPropertyValue('--tx-spread')) || 0);
@@ -126,6 +192,7 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
 
           if (!moved) {
             moved = true;
+            setDragActive(true);
             card.classList.add(styles['dragging']);
             card.dataset.wasDragged = '1';
             // Lock scroll during drag
@@ -151,21 +218,27 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
             } else {
               c.style.transform = `translateX(${positions[ci]}px) rotate(0deg)`;
             }
-            c.style.transition = 'transform 0.2s var(--ease-out)';
+            c.style.transition = 'transform var(--duration-fast) var(--ease-out)';
           });
 
           dropIdx = newIdx;
         };
 
-        const onUp = () => {
+        const finish = (commit: boolean) => {
+          if (finished) return;
+          finished = true;
           card.removeEventListener('pointermove', onMove);
           card.removeEventListener('pointerup', onUp);
+          card.removeEventListener('pointercancel', onCancel);
+          card.removeEventListener('lostpointercapture', onLostPointerCapture);
           card.classList.remove(styles['dragging']);
 
           allCards.forEach(c => { c.style.transform = ''; c.style.transition = ''; });
           container.classList.remove(styles['dragging-active']);
+          setDragActive(false);
+          activeDragCleanups.delete(cancelActiveDrag);
 
-          if (!moved) return;
+          if (!commit || !moved) return;
 
           if (dropIdx !== dragIdx) {
             const currentAgents = agentsRef.current;
@@ -184,8 +257,16 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
           }
         };
 
+        const onUp = () => finish(true);
+        const onCancel = () => finish(false);
+        const onLostPointerCapture = () => finish(false);
+        const cancelActiveDrag = () => finish(false);
+
         card.addEventListener('pointermove', onMove);
         card.addEventListener('pointerup', onUp);
+        card.addEventListener('pointercancel', onCancel);
+        card.addEventListener('lostpointercapture', onLostPointerCapture);
+        activeDragCleanups.add(cancelActiveDrag);
       };
 
       card.addEventListener('pointerdown', handler);
@@ -193,25 +274,41 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
     });
 
     return () => {
+      for (const cancel of [...activeDragCleanups]) cancel();
       handlers.forEach(([el, fn]) => el.removeEventListener('pointerdown', fn));
     };
   }, [agents, spreadStep]);
 
   const suppressContextMenu = useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    e.stopPropagation();
   }, []);
 
   const selectedAgent = selectedId ? agents.find(a => a.id === selectedId) : null;
-  const isSelectedCurrent = selectedAgent?.id === currentAgentId;
   const canSetPrimary = !!selectedAgent && !selectedAgent.isPrimary;
-  const canDeleteSelected = !!selectedAgent && agents.length >= 2 && !selectedAgent.isPrimary && !isSelectedCurrent;
+  // 删除门控只依据 agent 自身属性（非主助手）+ 数量下限，刻意不挂钩 currentAgentId：
+  // 新建 agent 会被自动切为当前 agent，门控若看 current 则新建后永远删不掉（#1301）。
+  // 删当前 agent 是安全的：AgentDeleteOverlay 会先切到其他 agent 再 DELETE，后端也拒删 active agent。
+  const canDeleteSelected = !!selectedAgent && agents.length >= 2 && !selectedAgent.isPrimary;
+  const isExportingSelected = !!selectedAgent && exportingAgentId === selectedAgent.id;
 
   return (
     <div
       className={styles['agent-card-stack']}
       style={{ '--cards-spread-width': spreadWidth } as React.CSSProperties}
     >
-      <div className={styles['agent-cards']} ref={cardsRef}>
+      <div
+        className={`${styles['agent-cards']}${expanded ? ' ' + styles['agent-cards-expanded'] : ''}`}
+        ref={cardsRef}
+        onPointerEnter={() => setPointerInside(true)}
+        onPointerLeave={() => setPointerInside(false)}
+        onFocus={() => setFocusWithin(true)}
+        onBlur={(event) => {
+          const next = event.relatedTarget;
+          if (next instanceof Node && event.currentTarget.contains(next)) return;
+          setFocusWithin(false);
+        }}
+      >
         {/* spacer: 撑出实际滚动宽度，绝对定位的卡片不贡献 scrollWidth */}
         <div data-spacer="1" style={{ width: spreadWidth, height: 1, pointerEvents: 'none', flexShrink: 0 }} />
         {agents.map((agent, i) => {
@@ -245,7 +342,7 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
                   className={styles['agent-card-avatar']}
                   draggable={false}
                   src={agent.hasAvatar
-                    ? hanaUrl(`/api/agents/${agent.id}/avatar?t=${ts}`)
+                    ? hanaUrl(`/api/agents/${agent.id}/avatar${agent.avatarRevision ? `?v=${encodeURIComponent(agent.avatarRevision)}` : ''}`)
                     : yuanFallbackAvatar(agent.yuan)}
                   onError={(e) => {
                     const img = e.target as HTMLImageElement;
@@ -259,7 +356,7 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
                   </div>
                 )}
               </div>
-              {agent.id === currentAgentId && <div className={styles['agent-card-badge']} />}
+              {agent.isPrimary && <div className={styles['agent-card-badge']} />}
               <span className={styles['agent-card-name']}>{agent.name}</span>
             </div>
           );
@@ -290,11 +387,19 @@ export function AgentCardStack({ agents, selectedId, currentAgentId, onSelect, o
             <button
               type="button"
               className={styles['agent-card-action']}
-              onClick={() => onSetActive(selectedAgent.id)}
+              onClick={() => onSetPrimary(selectedAgent.id)}
             >
-              {t('settings.agent.setActive')}
+              {t('settings.agent.setPrimary')}
             </button>
           )}
+          <button
+            type="button"
+            className={styles['agent-card-action']}
+            onClick={() => onExport(selectedAgent.id)}
+            disabled={!!exportingAgentId}
+          >
+            {isExportingSelected ? t('settings.agent.generatingPreview') : t('settings.agent.exportAgent')}
+          </button>
           {canDeleteSelected && (
             <button
               type="button"

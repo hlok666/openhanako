@@ -6,30 +6,33 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
+import { getYuanVisual } from '../../../../shared/yuan-visuals.ts';
 
 const DEFAULT_NAME = 'Hanako';
-const YUAN_AVATARS: Record<string, string> = {
-  hanako: 'Hanako.png',
-  butter: 'Butter.png',
-  ming: 'Ming.png',
-};
-const YUAN_SYMBOLS: Record<string, string> = {
-  hanako: '\u273F',  // ✿
-  butter: '\u274A',  // ❊
-  ming: '\u25C8',    // ◈
-};
-const YUAN_COLORS: Record<string, string> = {
-  hanako: '#537D96',
-  butter: '#5BA88C',
-  ming: '#8BA4B4',
-};
+const DEFAULT_VISUAL = getYuanVisual('hanako');
+
+type SplashLocaleData = { splash?: { preparing?: { named?: string; anonymous?: string } } } | null | undefined;
+
+/**
+ * 首启 seed 解压模式的文案选择：agentName 为 null/空时绝对不能回落到 DEFAULT_NAME
+ * 这类默认拟人名，只能用"你的助手" / "Your assistant"。
+ * 导出供单测覆盖这条"禁止回落"契约。
+ */
+export function resolvePreparingText(data: SplashLocaleData, locale: string, agentName: string | null): string {
+  const hasName = Boolean(agentName);
+  const tpl = data?.splash?.preparing?.[hasName ? 'named' : 'anonymous']
+    || (locale === 'en'
+      ? (hasName ? '{name} is preparing a new home…' : 'Your assistant is preparing a new home…')
+      : (hasName ? '{name} 正在准备新家…' : '你的助手正在准备新家…'));
+  return hasName ? tpl.replaceAll('{name}', agentName as string) : tpl;
+}
 
 export function SplashApp() {
   const [avatarSrc, setAvatarSrc] = useState('assets/Hanako.png');
   const [text, setText] = useState('');
   const [switching, setSwitching] = useState(false);
-  const [symbol, setSymbol] = useState(YUAN_SYMBOLS.hanako);
-  const [accentColor, setAccentColor] = useState(YUAN_COLORS.hanako);
+  const [symbol, setSymbol] = useState(DEFAULT_VISUAL.symbol);
+  const [accentColor, setAccentColor] = useState(DEFAULT_VISUAL.accent);
   const linesRef = useRef<string[]>([]);
   const indexRef = useRef(0);
 
@@ -45,6 +48,7 @@ export function SplashApp() {
     (async () => {
       let locale = 'zh';
       let name = DEFAULT_NAME;
+      let agentNameRaw: string | null = null;
       let yuan = 'hanako';
 
       try {
@@ -59,21 +63,25 @@ export function SplashApp() {
           if (base) {
             setAvatarSrc(`${base}?t=${Date.now()}`);
           } else if (splashInfo?.yuan) {
-            setAvatarSrc(`assets/${YUAN_AVATARS[splashInfo.yuan] || 'Hanako.png'}`);
+            setAvatarSrc(`assets/${getYuanVisual(splashInfo.yuan).avatar}`);
           }
         } else if (splashInfo?.yuan) {
-          setAvatarSrc(`assets/${YUAN_AVATARS[splashInfo.yuan] || 'Hanako.png'}`);
+          setAvatarSrc(`assets/${getYuanVisual(splashInfo.yuan).avatar}`);
         }
 
-        if (splashInfo?.agentName) name = splashInfo.agentName;
+        if (splashInfo?.agentName) {
+          name = splashInfo.agentName;
+          agentNameRaw = splashInfo.agentName;
+        }
         if (splashInfo?.locale?.startsWith('en')) locale = 'en';
         if (splashInfo?.yuan) yuan = splashInfo.yuan;
 
-        setSymbol(YUAN_SYMBOLS[yuan] || YUAN_SYMBOLS.hanako);
-        setAccentColor(YUAN_COLORS[yuan] || YUAN_COLORS.hanako);
+        const visual = getYuanVisual(yuan);
+        setSymbol(visual.symbol);
+        setAccentColor(visual.accent);
       } catch {}
 
-      // 安装模式：固定文案，不进轮播
+      // 安装模式：固定文案，不进轮播（壳更新场景，走 electron-updater 安装）
       if (mode === 'installing') {
         const data = await fetch(`./locales/${locale}.json`).then(r => r.json()).catch(() => null);
         const tpl = data?.splash?.installing
@@ -81,6 +89,14 @@ export function SplashApp() {
             ? '{name} is updating to v{version}, please wait…'
             : '{name} 正在更新到 v{version}，请稍候…');
         setText(tpl.replaceAll('{name}', name).replaceAll('{version}', installVersion || ''));
+        return;
+      }
+
+      // 首启 seed 解压模式：固定文案，不进轮播（新装场景，不带版本号）。
+      // 未配置 Agent 名字时禁止回落 DEFAULT_NAME，只能用"你的助手" / "Your assistant"。
+      if (mode === 'preparing') {
+        const data = await fetch(`./locales/${locale}.json`).then(r => r.json()).catch(() => null);
+        setText(resolvePreparingText(data, locale, agentNameRaw));
         return;
       }
 

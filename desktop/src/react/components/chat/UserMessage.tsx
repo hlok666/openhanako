@@ -2,19 +2,34 @@
  * UserMessage — 用户消息气泡
  */
 
-import { memo, useCallback, useEffect, useState } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { MarkdownContent } from './MarkdownContent';
+import { MessageFooterActions, formatMessageTime, type MessageFooterAction } from './MessageFooterActions';
+import { useMessageFooterActions } from './MessageActions';
 import { AttachmentChip } from '../shared/AttachmentChip';
-import { MessageActions } from './MessageActions';
-const lazyScreenshot = () => import('../../utils/screenshot').then(m => m.takeScreenshot);
-import type { ChatMessage, UserAttachment, DeskContext, ContentBlock } from '../../stores/chat-types';
+import { AudioAttachmentChip } from '../shared/AudioAttachmentChip';
+import { FileKindIcon } from '../shared/FileKindIcon';
+import { FolderIcon } from '../shared/FolderIcon';
+import type { ChatMessage, UserAttachment, DeskContext } from '../../stores/chat-types';
 import { useStore } from '../../stores';
-import { selectIsStreamingSession, selectSelectedIdsBySession } from '../../stores/session-selectors';
+import { selectSelectedIdsBySession } from '../../stores/session-selectors';
+import { extractSelectedTexts } from '../../utils/message-text';
 import { openFilePreview } from '../../utils/file-preview';
-import { isImageOrSvgExt, extOfName } from '../../utils/file-kind';
+import { isImageOrSvgExt, extOfName, kindOfFileName } from '../../utils/file-kind';
 import { getUserAttachmentImageSrc } from '../../utils/user-attachment-media';
+import { AgentAvatar, resolveAgentDisplayInfo } from '../../utils/agent-display';
+import {
+  retrySessionTurn,
+  type ForkedSessionHandler,
+  type SessionNodeTarget,
+} from '../../stores/message-turn-actions';
+import { AgentReviewCard } from './AgentReviewCard';
+import { AgentReviewRequestCard } from './AgentReviewRequestCard';
+import { useSessionNodeActions } from './SessionNodeActions';
 import styles from './Chat.module.css';
 import badgeStyles from '../input/SkillBadgeView.module.css';
+
+const lazyScreenshot = () => import('../../utils/screenshot').then(m => m.takeScreenshot);
 
 interface Props {
   message: ChatMessage;
@@ -22,60 +37,68 @@ interface Props {
   sessionPath: string;
   readOnly?: boolean;
   hideIdentity?: boolean;
+  userIdentity?: { name?: string | null; avatarUrl?: string | null };
+  viewerIdentity: { name: string; avatarUrl: string | null };
+  isStreaming: boolean;
+  isSelected: boolean;
+  isLatestUserMessage?: boolean;
+  onForkCreated?: ForkedSessionHandler;
+  messageRef?: (element: HTMLDivElement | null) => void;
 }
 
-export const UserMessage = memo(function UserMessage({ message, showAvatar, sessionPath, readOnly = false, hideIdentity = false }: Props) {
-  const userAvatarUrl = useStore(s => s.userAvatarUrl);
+export const UserMessage = memo(function UserMessage({
+  message,
+  showAvatar,
+  sessionPath,
+  readOnly = false,
+  hideIdentity = false,
+  userIdentity,
+  viewerIdentity,
+  isStreaming,
+  isSelected,
+  isLatestUserMessage = false,
+  onForkCreated,
+  messageRef,
+}: Props) {
   const t = window.t ?? ((p: string) => p);
-  const userName = useStore(s => s.userName) || t('common.me');
-  const [avatarFailed, setAvatarFailed] = useState(false);
-
-  const isStreaming = useStore(s => selectIsStreamingSession(s, sessionPath));
-  const selectedIds = useStore(s => selectSelectedIdsBySession(s, sessionPath));
-  const isSelected = selectedIds.includes(message.id);
+  const storeUserName = viewerIdentity.name;
+  const userName = userIdentity?.name || storeUserName;
+  const displayAvatarUrl = userIdentity ? (userIdentity.avatarUrl || null) : viewerIdentity.avatarUrl;
+  const userDisplayInfo = useMemo(() => resolveAgentDisplayInfo({
+    id: 'user',
+    agents: [],
+    userName,
+    userAvatarUrl: displayAvatarUrl,
+  }), [userName, displayAvatarUrl]);
 
   const [copied, setCopied] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editValue, setEditValue] = useState(message.text || '');
+  const [editBusy, setEditBusy] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   useEffect(() => {
-    setAvatarFailed(false);
-  }, [userAvatarUrl]);
+    if (!editing) setEditValue(message.text || '');
+  }, [editing, message.text]);
+
+  useEffect(() => {
+    if (!editing) return;
+    const el = textareaRef.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, [editing]);
 
   const handleCopy = useCallback(() => {
-    const state = useStore.getState();
-    const ids = selectSelectedIdsBySession(state, sessionPath);
-
-    if (ids.length > 0) {
-      const session = state.chatSessions[sessionPath];
-      if (!session) return;
-      const texts: string[] = [];
-      for (const item of session.items) {
-        if (item.type !== 'message') continue;
-        if (!ids.includes(item.data.id)) continue;
-        if (item.data.role === 'user') {
-          texts.push(item.data.text || '');
-        } else {
-          const textBlocks = (item.data.blocks || []).filter(
-            (b): b is ContentBlock & { type: 'text' } => b.type === 'text'
-          );
-          if (textBlocks.length === 0) continue;
-          // eslint-disable-next-line no-restricted-syntax
-          const tmp = document.createElement('div');
-          tmp.innerHTML = textBlocks.map(b => b.html).join('\n');
-          texts.push(tmp.innerText.trim());
-        }
-      }
-      navigator.clipboard.writeText(texts.join('\n\n')).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }).catch(() => {});
-    } else {
-      const text = message.text || '';
-      if (!text) return;
-      navigator.clipboard.writeText(text).then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
-      }).catch(() => {});
-    }
+    const ids = selectSelectedIdsBySession(useStore.getState(), sessionPath);
+    const text = ids.length > 0
+      ? extractSelectedTexts(sessionPath, ids)
+      : (message.text || '');
+    if (!text) return;
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    }).catch(() => {});
   }, [message.text, sessionPath]);
 
   const handleScreenshot = useCallback(async () => {
@@ -83,24 +106,104 @@ export const UserMessage = memo(function UserMessage({ message, showAvatar, sess
     fn(message.id, sessionPath);
   }, [message.id, sessionPath]);
 
+  const isReviewTurn = !!message.agentReview || !!message.agentReviewRequest;
+  const turnTarget = useMemo<SessionNodeTarget | null>(() => (
+    message.sourceEntryId
+      ? { role: 'user', entryId: message.sourceEntryId }
+      : null
+  ), [message.sourceEntryId]);
+  const { actions: nodeActions, busy: nodeActionBusy } = useSessionNodeActions({
+    sessionPath,
+    target: readOnly ? null : turnTarget,
+    retryMessage: message,
+    onForkCreated,
+    disabled: isStreaming,
+  });
+  const busy = editBusy || nodeActionBusy;
+
+  const handleEdit = useCallback(() => {
+    if (busy || isStreaming) return;
+    setEditValue(message.text || '');
+    setEditing(true);
+  }, [busy, isStreaming, message.text]);
+
+  const handleCancelEdit = useCallback(() => {
+    if (busy) return;
+    setEditing(false);
+    setEditValue(message.text || '');
+  }, [busy, message.text]);
+
+  const handleConfirmEdit = useCallback(async () => {
+    const nextText = editValue.trim();
+    if (!nextText || busy || isStreaming) return;
+    setEditBusy(true);
+    try {
+      if (!turnTarget) return;
+      const ok = await retrySessionTurn(
+        sessionPath,
+        turnTarget,
+        { message, replacementText: nextText },
+      );
+      if (ok) setEditing(false);
+    } finally {
+      setEditBusy(false);
+    }
+  }, [busy, editValue, isStreaming, message, sessionPath, turnTarget]);
+
+  // Retry and fork preserve the recorded review envelope. Inline text editing remains
+  // unavailable because changing only its text would no longer match that snapshot.
+  const canEdit = !readOnly && !isReviewTurn && isLatestUserMessage && !!turnTarget;
+  const timeText = formatMessageTime(message.timestamp);
+  const editingActions: MessageFooterAction[] = useMemo(() => [
+    {
+      id: 'cancel',
+      title: t('common.cancel'),
+      icon: <XIcon />,
+      onClick: () => handleCancelEdit(),
+      disabled: busy,
+    },
+    {
+      id: 'confirm',
+      title: t('common.confirm'),
+      icon: <CheckIcon />,
+      onClick: () => { void handleConfirmEdit(); },
+      disabled: busy || !editValue.trim(),
+    },
+  ], [busy, editValue, handleCancelEdit, handleConfirmEdit, t]);
+  const standardMessageActions = useMessageFooterActions({
+    messageId: message.id,
+    sessionPath,
+    onCopy: handleCopy,
+    onScreenshot: () => { void handleScreenshot(); },
+    copied,
+    isStreaming: isStreaming || busy,
+  });
+  const messageActions = readOnly || editing ? [] : standardMessageActions;
+  const editActions: MessageFooterAction[] = useMemo(() => canEdit ? [
+    {
+      id: 'edit',
+      title: t('common.edit'),
+      icon: <EditIcon />,
+      onClick: () => handleEdit(),
+      disabled: isStreaming || busy,
+    },
+  ] : [], [busy, canEdit, handleEdit, isStreaming, t]);
+  const footerActions = editing ? editingActions : [...nodeActions, ...editActions];
+  const hasSkillBadges = !!message.skills?.length;
+  const hasTextBubble = editing || !!message.textHtml || hasSkillBadges;
+
   return (
     <div className={`${styles.messageGroup} ${styles.messageGroupUser}${isSelected ? ` ${styles.messageGroupSelected}` : ''}`}
+         ref={messageRef}
          data-message-id={message.id}>
       {showAvatar && !hideIdentity && (
         <div className={`${styles.avatarRow} ${styles.avatarRowUser}`}>
           <span className={styles.avatarName}>{userName}</span>
-          {userAvatarUrl && !avatarFailed ? (
-            <img
-              className={styles.avatar}
-              src={userAvatarUrl}
-              alt={userName}
-              draggable={false}
-              onError={() => setAvatarFailed(true)}
-              style={{ objectFit: 'cover' }}
-            />
-          ) : (
-            <span className={`${styles.avatar} ${styles.userAvatar}`}>👧🏻</span>
-          )}
+          <AgentAvatar
+            info={userDisplayInfo}
+            className={`${styles.avatar} ${styles.userAvatar}`}
+            alt={userName}
+          />
         </div>
       )}
       {message.quotedText && (
@@ -119,27 +222,51 @@ export const UserMessage = memo(function UserMessage({ message, showAvatar, sess
           messageId={message.id}
         />
       )}
-      <div className={`${styles.message} ${styles.messageUser}`}>
-        {message.skills && message.skills.length > 0 && message.skills.map(skillName => (
-          <span key={skillName} className={badgeStyles.badge} style={{ cursor: 'default' }}>
-            <svg className={badgeStyles.icon} width="13" height="13" viewBox="0 0 16 16" fill="none"
-              stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
-              <path d="M8 1 L9.5 6 L15 8 L9.5 10 L8 15 L6.5 10 L1 8 L6.5 6 Z" />
-            </svg>
-            <span className={badgeStyles.name}>{skillName}</span>
-          </span>
-        ))}
-        {message.textHtml && <MarkdownContent html={message.textHtml} />}
-      </div>
-      {!readOnly && (
-        <MessageActions
-          messageId={message.id}
-          sessionPath={sessionPath}
-          align="left"
-          onCopy={handleCopy}
-          onScreenshot={handleScreenshot}
-          copied={copied}
-          isStreaming={isStreaming}
+      {hasTextBubble && (
+        <div className={`${styles.message} ${styles.messageUser}${editing ? ` ${styles.messageUserEditing}` : ''}`}>
+          {message.skills && message.skills.length > 0 && message.skills.map(skillName => (
+            <span key={skillName} className={badgeStyles.badge} style={{ cursor: 'default' }}>
+              <svg className={badgeStyles.icon} width="13" height="13" viewBox="0 0 16 16" fill="none"
+                stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
+                <path d="M8 1 L9.5 6 L15 8 L9.5 10 L8 15 L6.5 10 L1 8 L6.5 6 Z" />
+              </svg>
+              <span className={badgeStyles.name}>{skillName}</span>
+            </span>
+          ))}
+          {editing ? (
+            <textarea
+              ref={textareaRef}
+              className={styles.userEditTextarea}
+              value={editValue}
+              onChange={(e) => setEditValue(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                  e.preventDefault();
+                  void handleConfirmEdit();
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  handleCancelEdit();
+                }
+              }}
+              disabled={busy}
+              spellCheck={false}
+            />
+          ) : (
+            message.textHtml && <MarkdownContent html={message.textHtml} linkContext={{ origin: 'session', sessionPath, messageId: message.id }} />
+          )}
+        </div>
+      )}
+      {message.agentReview && <AgentReviewCard review={message.agentReview} />}
+      {message.agentReviewRequest && <AgentReviewRequestCard request={message.agentReviewRequest} />}
+      {(timeText || messageActions.length > 0 || footerActions.length > 0) && (
+        <MessageFooterActions
+          align="right"
+          timeText={timeText}
+          leadingActions={footerActions}
+          visible={editing}
+          actions={messageActions}
+          testId="user-message-footer-actions"
         />
       )}
     </div>
@@ -167,6 +294,46 @@ const UserAttachmentsView = memo(function UserAttachmentsView({ attachments, des
         const expired = att.status === 'expired';
         const expiredLabel = t('chat.fileExpired');
         const imageSrc = !expired && isImage(att) ? getUserAttachmentImageSrc(att) : null;
+        const kind = att.isDir ? 'directory' : kindOfFileName(att.name || att.path, att.mimeType);
+        if (!expired && kind === 'audio') {
+          const isVoiceInput = att.presentation === 'voice-input';
+          const transcriptText = isVoiceInput && att.transcription?.status === 'ready'
+            ? att.transcription.text?.trim()
+            : '';
+          if (isVoiceInput) {
+            return (
+              <div key={att.fileId || att.path || att.name || `att-${i}`} className={styles.voiceInputCard}>
+                {transcriptText && <div className={styles.voiceInputTranscript}>{transcriptText}</div>}
+                <AudioAttachmentChip
+                  file={{
+                    path: att.path,
+                    name: att.name,
+                    base64Data: att.base64Data,
+                    mimeType: att.mimeType,
+                    waveform: att.waveform,
+                  }}
+                  showName={false}
+                  className={styles.voiceInputAudioStrip}
+                  waveform={att.waveform}
+                />
+              </div>
+            );
+          }
+          return (
+            <AudioAttachmentChip
+              key={att.fileId || att.path || att.name || `att-${i}`}
+              file={{
+                path: att.path,
+                name: att.name,
+                base64Data: att.base64Data,
+                mimeType: att.mimeType,
+                waveform: att.waveform,
+              }}
+              showName={att.presentation !== 'voice-input'}
+              waveform={att.waveform}
+            />
+          );
+        }
         if (imageSrc) {
           return (
             <div key={att.name || `att-${i}`} className={styles.attachImageWrap}>
@@ -184,7 +351,7 @@ const UserAttachmentsView = memo(function UserAttachmentsView({ attachments, des
                     messageId,
                   });
                 }}
-                style={{ cursor: 'pointer' }}
+                style={{ cursor: 'default' }}
               />
               {att.visionAuxiliary && (
                 <div className={styles.visionAuxiliaryLabel}>
@@ -196,8 +363,8 @@ const UserAttachmentsView = memo(function UserAttachmentsView({ attachments, des
         }
         return (
           <AttachmentChip
-            key={att.name || `att-${i}`}
-            icon={att.isDir ? <FolderIcon /> : <FileIcon />}
+            key={att.fileId || att.path || att.name || `att-${i}`}
+            icon={att.isDir ? <FolderIcon /> : <FileKindIcon kind={kindOfFileName(att.name || att.path, att.mimeType)} size={14} />}
             name={expired ? `${att.name} · ${expiredLabel}` : att.name}
             variant={expired ? 'expired' : 'normal'}
           />
@@ -226,19 +393,28 @@ function GridIcon() {
   );
 }
 
-function FolderIcon() {
+function EditIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 20h9" />
+      <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
     </svg>
   );
 }
 
-function FileIcon() {
+function CheckIcon() {
   return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
-      <polyline points="14 2 14 8 20 8" />
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="20 6 9 17 4 12" />
+    </svg>
+  );
+}
+
+function XIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M18 6 6 18" />
+      <path d="m6 6 12 12" />
     </svg>
   );
 }

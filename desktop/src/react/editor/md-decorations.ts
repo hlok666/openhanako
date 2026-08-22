@@ -2,15 +2,27 @@ import {
   EditorView, ViewPlugin, Decoration, WidgetType,
 } from '@codemirror/view';
 import type { DecorationSet, ViewUpdate } from '@codemirror/view';
-import { EditorState, RangeSetBuilder, StateField, type Transaction } from '@codemirror/state';
+import {
+  EditorSelection,
+  EditorState,
+  Facet,
+  RangeSetBuilder,
+  StateField,
+  type Transaction,
+} from '@codemirror/state';
 import { syntaxTree } from '@codemirror/language';
 import katex from 'katex';
 import { hrDecoration } from './widgets/hr';
 import { handleCheckbox } from './widgets/checkbox';
 import { handleBlockquote } from './widgets/blockquote';
 import { handleCodeBlock } from './widgets/code-block';
-import { handleImage } from './widgets/image';
+import { addImageDecoration, handleImage } from './widgets/image';
 import { handleLink } from './widgets/link';
+import {
+  parseObsidianImageEmbed,
+  resolveMarkdownImageSrc,
+  type MarkdownImageContext,
+} from '../utils/markdown';
 
 export type DecoRange = { from: number; to: number; deco: Decoration };
 export type LivePreviewRange =
@@ -21,13 +33,168 @@ interface LivePreviewOptions {
   includeBlockMath?: boolean;
 }
 
+export const markdownImageContextFacet = Facet.define<MarkdownImageContext, MarkdownImageContext>({
+  combine(values) {
+    return values[0] ?? {};
+  },
+});
+
 export const hideMark = Decoration.replace({});
 const centerLineDeco = Decoration.line({ class: 'cm-center-line' });
+const unconfirmedHeadingLineDeco = Decoration.line({ class: 'cm-unconfirmed-heading-line' });
 const markDeco = Decoration.mark({ class: 'cm-md-mark' });
+
+class ListBulletWidget extends WidgetType {
+  eq() { return true; }
+  toDOM() {
+    const span = document.createElement('span');
+    span.className = 'cm-list-bullet';
+    return span;
+  }
+}
+const listBulletDeco = Decoration.replace({ widget: new ListBulletWidget() });
+const autolinkDeco = Decoration.mark({ class: 'cm-link-text' });
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{3}(?:[0-9a-fA-F]{3})?(?:[0-9a-fA-F]{2})?$/;
 const RGB_COLOR_RE = /^rgba?\(\s*(?:\d{1,3}\s*,\s*){2}\d{1,3}(?:\s*,\s*(?:0|1|0?\.\d+))?\s*\)$/i;
 const BG_SPAN_RE = /<span\s+style=(["'])\s*background(?:-color)?\s*:\s*([^;"']+)\s*;?\s*\1>([\s\S]*?)<\/span>/ig;
 const FENCE_RE = /^(?: {0,3})(`{3,}|~{3,})/;
+
+interface CodeFenceBoundary {
+  readonly from: number;
+  readonly to: number;
+  readonly before: number | null;
+  readonly after: number | null;
+}
+
+const codeFenceBoundaryCache = new WeakMap<object, {
+  readonly tree: ReturnType<typeof syntaxTree>;
+  readonly boundaries: CodeFenceBoundary[];
+}>();
+
+function isClosingFenceLine(opening: string, candidate: string): boolean {
+  const openingMatch = opening.match(FENCE_RE);
+  const closingMatch = candidate.match(/^(?: {0,3})(`{3,}|~{3,})[ \t]*$/);
+  return Boolean(
+    openingMatch
+      && closingMatch
+      && openingMatch[1][0] === closingMatch[1][0]
+      && closingMatch[1].length >= openingMatch[1].length,
+  );
+}
+
+function codeFenceBoundaries(state: EditorState): CodeFenceBoundary[] {
+  const tree = syntaxTree(state);
+  const cached = codeFenceBoundaryCache.get(state.doc);
+  if (cached?.tree === tree) return cached.boundaries;
+  const boundaries: CodeFenceBoundary[] = [];
+  tree.iterate({
+    enter(node) {
+      if (node.name !== 'FencedCode') return;
+      const opening = state.doc.lineAt(node.from);
+      const end = state.doc.lineAt(node.to);
+      if (!FENCE_RE.test(opening.text)) return false;
+      const hasClosing = end.number > opening.number
+        && isClosingFenceLine(opening.text, end.text);
+      const firstBodyNumber = opening.number + 1;
+      const lastBodyNumber = hasClosing ? end.number - 1 : end.number;
+      const hasBody = firstBodyNumber <= lastBodyNumber;
+      const firstBody = hasBody ? state.doc.line(firstBodyNumber) : null;
+      const lastBody = hasBody ? state.doc.line(lastBodyNumber) : null;
+      const previousExternal = opening.number > 1
+        ? state.doc.line(opening.number - 1)
+        : null;
+      const nextExternal = hasClosing && end.number < state.doc.lines
+        ? state.doc.line(end.number + 1)
+        : null;
+
+      boundaries.push({
+        from: opening.from,
+        to: opening.to,
+        before: previousExternal?.to ?? firstBody?.from ?? nextExternal?.from ?? null,
+        after: firstBody?.from ?? nextExternal?.from ?? previousExternal?.to ?? null,
+      });
+      if (hasClosing) {
+        boundaries.push({
+          from: end.from,
+          to: end.to,
+          before: lastBody?.to ?? previousExternal?.to ?? nextExternal?.from ?? null,
+          after: nextExternal?.from ?? lastBody?.to ?? previousExternal?.to ?? null,
+        });
+      }
+      return false;
+    },
+  });
+  codeFenceBoundaryCache.set(state.doc, { tree, boundaries });
+  return boundaries;
+}
+
+function normalizeCodeFenceSelection(
+  state: EditorState,
+  selection: EditorSelection,
+  previous: EditorSelection,
+): EditorSelection {
+  const boundaries = codeFenceBoundaries(state);
+  if (boundaries.length === 0) return selection;
+  let changed = false;
+  const ranges = selection.ranges.map((range, index) => {
+    if (!range.empty) return range;
+    const boundary = boundaries.find(candidate => (
+      range.from >= candidate.from && range.from <= candidate.to
+    ));
+    if (!boundary) return range;
+    const previousHead = previous.ranges[index]?.head ?? previous.main.head;
+    const position = previousHead > boundary.to
+      ? boundary.before
+      : previousHead < boundary.from
+        ? boundary.after
+        : boundary.after ?? boundary.before;
+    if (position === null || position === range.from) return range;
+    changed = true;
+    return EditorSelection.cursor(position, position < range.from ? 1 : -1);
+  });
+  return changed ? EditorSelection.create(ranges, selection.mainIndex) : selection;
+}
+
+function eventTargetElement(target: EventTarget | null): Element | null {
+  if (!target || typeof target !== 'object' || !('nodeType' in target)) return null;
+  const node = target as Node;
+  return node.nodeType === 1 ? node as Element : node.parentElement;
+}
+
+function isCodeFenceBoundaryTarget(target: EventTarget | null): boolean {
+  return Boolean(eventTargetElement(target)?.closest(
+    '.cm-codeblock-line-first, .cm-codeblock-line-last',
+  ));
+}
+
+const codeFenceBoundarySelectionFilter = EditorState.transactionFilter.of((transaction) => {
+  if (transaction.docChanged || !transaction.selection) return transaction;
+  const selection = normalizeCodeFenceSelection(
+    transaction.startState,
+    transaction.newSelection,
+    transaction.startState.selection,
+  );
+  if (selection.eq(transaction.newSelection)) return transaction;
+  return [transaction, { selection, sequential: true }];
+});
+
+const codeFenceBoundaryEventHandlers = EditorView.domEventHandlers({
+  mousedown(event) {
+    if (!isCodeFenceBoundaryTarget(event.target)) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    return true;
+  },
+  focus(_event, view) {
+    const selection = normalizeCodeFenceSelection(
+      view.state,
+      view.state.selection,
+      view.state.selection,
+    );
+    if (!selection.eq(view.state.selection)) view.dispatch({ selection });
+    return false;
+  },
+});
 
 export const CONCEAL_MARKS = new Set([
   'HeaderMark', 'EmphasisMark', 'CodeMark', 'StrikethroughMark',
@@ -85,6 +252,33 @@ function collectInlineCodeRanges(line: string): InlineRange[] {
     i = end + tickCount;
   }
   return ranges;
+}
+
+function collectFenceLineNumbers(src: string): Set<number> {
+  const fenced = new Set<number>();
+  const lines = src.split('\n');
+  let inFence = false;
+  let fenceChar: '`' | '~' | null = null;
+
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    const line = lines[idx];
+    const fence = line.match(FENCE_RE);
+    if (!inFence && fence) {
+      inFence = true;
+      fenceChar = fence[1][0] as '`' | '~';
+      fenced.add(idx + 1);
+      continue;
+    }
+    if (inFence) {
+      fenced.add(idx + 1);
+      if (fence && fenceChar === fence[1][0]) {
+        inFence = false;
+        fenceChar = null;
+      }
+    }
+  }
+
+  return fenced;
 }
 
 function findInlineMath(line: string, lineOffset: number, ranges: LivePreviewRange[], excluded: InlineRange[]): void {
@@ -282,13 +476,12 @@ function livePreviewDeco(range: LivePreviewRange): DecoRange {
 function buildMarkdownBlockDecorations(state: EditorState): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   const activeLines = collectActiveLinesFromState(state);
-  const ranges = collectLivePreviewRanges(state.doc.toString(), activeLines)
-    .filter((range): range is Extract<LivePreviewRange, { kind: 'blockMath' }> => range.kind === 'blockMath');
+  const ranges: DecoRange[] = collectLivePreviewRanges(state.doc.toString(), activeLines)
+    .filter((range): range is Extract<LivePreviewRange, { kind: 'blockMath' }> => range.kind === 'blockMath')
+    .map(livePreviewDeco);
 
-  for (const range of ranges) {
-    const { from, to, deco } = livePreviewDeco(range);
-    builder.add(from, to, deco);
-  }
+  ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+  for (const { from, to, deco } of ranges) builder.add(from, to, deco);
 
   return builder.finish();
 }
@@ -305,26 +498,34 @@ export const markdownBlockDecoField = StateField.define<DecorationSet>({
 });
 
 export function buildMarkdownDecorations(view: EditorView): DecorationSet {
-  const activeLines = collectActiveLines(view);
+  const concealedSourceLines = new Set<number>();
   const ranges: DecoRange[] = [];
+  const imageContext = view.state.facet(markdownImageContextFacet);
 
   for (const { from, to } of view.visibleRanges) {
     syntaxTree(view.state).iterate({
       from, to,
       enter(node) {
         const line = view.state.doc.lineAt(node.from);
-        const isActive = activeLines.has(line.number);
-
-        // ── 始终渲染（不受 isActive 控制）──
+        const isUnconfirmedHeading = /^#{1,6}$/.test(line.text);
+        // ── 始终渲染，不再由焦点行改变文档外观 ──
         switch (node.name) {
           case 'ATXHeading1':
-            ranges.push({ from: line.from, to: line.from, deco: centerLineDeco });
+            ranges.push({
+              from: line.from,
+              to: line.from,
+              deco: isUnconfirmedHeading ? unconfirmedHeadingLineDeco : centerLineDeco,
+            });
+            return;
+          case 'ATXHeading2': case 'ATXHeading3': case 'ATXHeading4':
+          case 'ATXHeading5': case 'ATXHeading6':
+            if (isUnconfirmedHeading) {
+              ranges.push({ from: line.from, to: line.from, deco: unconfirmedHeadingLineDeco });
+            }
             return;
           case 'HorizontalRule':
-            if (!isActive) {
-              ranges.push({ from: node.from, to: node.to, deco: hrDecoration });
-              ranges.push({ from: line.from, to: line.from, deco: centerLineDeco });
-            }
+            ranges.push({ from: node.from, to: node.to, deco: hrDecoration });
+            ranges.push({ from: line.from, to: line.from, deco: centerLineDeco });
             return;
           case 'TaskMarker':
             handleCheckbox({ view, node, ranges });
@@ -333,26 +534,60 @@ export function buildMarkdownDecorations(view: EditorView): DecorationSet {
             handleBlockquote({ view, node, ranges });
             return;
           case 'FencedCode':
-            handleCodeBlock({ view, node, activeLines, ranges });
+            handleCodeBlock({ view, node, ranges });
             return false; // don't traverse children
         }
 
-        // ── 活跃行：跳过所有 conceal / replace ──
-        if (isActive) return;
+        if (node.name === 'Image') {
+          handleImage({ view, node, activeLines: concealedSourceLines, ranges, imageContext });
+          return;
+        }
 
-        // ── 非活跃行：按节点类型处理 ──
+        // ── 已成立的语法按节点类型 conceal / replace ──
         switch (node.name) {
-          case 'Image':
-            handleImage({ view, node, activeLines, ranges });
-            break;
           case 'Link':
-            handleLink({ view, node, activeLines, ranges });
+            handleLink({ view, node, ranges });
             break;
+          case 'Autolink': {
+            // Autolink <url> — hide angle brackets, keep URL text visible with link style
+            const full = view.state.doc.sliceString(node.from, node.to);
+            if (full.startsWith('<') && full.endsWith('>')) {
+              ranges.push({ from: node.from, to: node.from + 1, deco: hideMark });
+              ranges.push({ from: node.from + 1, to: node.to - 1, deco: autolinkDeco });
+              ranges.push({ from: node.to - 1, to: node.to, deco: hideMark });
+            }
+            return false; // prevent child URL/LinkMark from being concealed
+          }
+          case 'URL': {
+            const parentName = node.node.parent?.name;
+            const isDestination = parentName === 'Link' || parentName === 'Image';
+            ranges.push({
+              from: node.from,
+              to: node.to,
+              deco: isDestination ? hideMark : autolinkDeco,
+            });
+            break;
+          }
+          case 'ListMark': {
+            const markText = view.state.doc.sliceString(node.from, node.to);
+            if (markText !== '-' && markText !== '*' && markText !== '+') break;
+            let hideTo = node.to;
+            if (view.state.doc.sliceString(hideTo, hideTo + 1) === ' ') hideTo += 1;
+            const rest = view.state.doc.sliceString(node.to, Math.min(node.to + 5, line.to));
+            const isTask = /^ ?\[[ xX]\]/.test(rest);
+            if (isTask) {
+              ranges.push({ from: node.from, to: hideTo, deco: hideMark });
+            } else {
+              ranges.push({ from: node.from, to: hideTo, deco: listBulletDeco });
+            }
+            break;
+          }
           // conceal marks
           case 'HeaderMark': case 'EmphasisMark': case 'CodeMark':
-          case 'StrikethroughMark': case 'LinkMark': case 'URL': case 'QuoteMark': {
+          case 'StrikethroughMark': case 'LinkMark': case 'QuoteMark': {
             let hideTo = node.to;
             if (node.name === 'HeaderMark') {
+              if (isUnconfirmedHeading) break;
               const next = view.state.doc.sliceString(hideTo, hideTo + 1);
               if (next === ' ') hideTo += 1;
             }
@@ -364,7 +599,9 @@ export function buildMarkdownDecorations(view: EditorView): DecorationSet {
     });
   }
 
-  for (const range of collectLivePreviewRanges(view.state.doc.toString(), activeLines, { includeBlockMath: false })) {
+  collectObsidianImageDecorations(view, concealedSourceLines, imageContext, ranges);
+
+  for (const range of collectLivePreviewRanges(view.state.doc.toString(), concealedSourceLines, { includeBlockMath: false })) {
     ranges.push(livePreviewDeco(range));
   }
 
@@ -372,6 +609,67 @@ export function buildMarkdownDecorations(view: EditorView): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   for (const r of ranges) builder.add(r.from, r.to, r.deco);
   return builder.finish();
+}
+
+function collectObsidianImageDecorations(
+  view: EditorView,
+  activeLines: Set<number>,
+  imageContext: MarkdownImageContext,
+  ranges: DecoRange[],
+): void {
+  const fencedLines = collectFenceLineNumbers(view.state.doc.toString());
+
+  for (const { from, to } of view.visibleRanges) {
+    let line = view.state.doc.lineAt(from);
+    while (line.from <= to) {
+      if (!activeLines.has(line.number) && !fencedLines.has(line.number)) {
+        collectObsidianImagesInLine(
+          line.text,
+          line.from,
+          imageContext,
+          ranges,
+          false,
+        );
+      }
+      if (line.to >= view.state.doc.length) break;
+      line = view.state.doc.line(line.number + 1);
+    }
+  }
+}
+
+function collectObsidianImagesInLine(
+  line: string,
+  lineOffset: number,
+  imageContext: MarkdownImageContext,
+  ranges: DecoRange[],
+  isActiveLine: boolean,
+): void {
+  const inlineCodeRanges = collectInlineCodeRanges(line);
+  let from = 0;
+
+  while (from < line.length) {
+    const start = findNextOutside(line, '![[', from, inlineCodeRanges);
+    if (start < 0) return;
+    const close = findNextOutside(line, ']]', start + 3, inlineCodeRanges);
+    if (close < 0) return;
+
+    const parsed = parseObsidianImageEmbed(line.slice(start + 3, close));
+    if (parsed) {
+      const src = resolveMarkdownImageSrc(parsed.src, imageContext);
+      addImageDecoration({
+        ranges,
+        from: lineOffset + start,
+        to: lineOffset + close + 2,
+        lineTo: lineOffset + line.length,
+        url: src,
+        alt: parsed.alt,
+        dimensions: parsed.dimensions,
+        placement: isActiveLine ? 'below-source-line' : 'replace-source',
+      });
+    }
+
+    from = close + 2;
+  }
 }
 
 export const markdownDecoPlugin = ViewPlugin.fromClass(
@@ -387,5 +685,8 @@ export const markdownDecoPlugin = ViewPlugin.fromClass(
       }
     }
   },
-  { decorations: (v) => v.decorations },
+  {
+    decorations: (v) => v.decorations,
+    provide: () => [codeFenceBoundarySelectionFilter, codeFenceBoundaryEventHandlers],
+  },
 );

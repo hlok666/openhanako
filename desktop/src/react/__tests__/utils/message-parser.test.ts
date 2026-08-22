@@ -51,6 +51,44 @@ describe('parseMoodFromContent', () => {
     const result = parseMoodFromContent(input);
     expect(result.mood).toBe('line1\nline2');
   });
+
+  it('保留行内代码里的 mood 字面量及后文', () => {
+    for (const tag of ['mood', 'pulse', 'reflect']) {
+      const input = `\`<${tag}>\` 后半段不能消失`;
+      expect(parseMoodFromContent(input)).toEqual({ mood: null, yuan: null, text: input });
+    }
+  });
+
+  it('保留代码栅里成对的内部标签字面量', () => {
+    const input = '```xml\n<mood>literal</mood>\n```\nafter';
+    expect(parseMoodFromContent(input)).toEqual({ mood: null, yuan: null, text: input });
+  });
+
+  it('正文开始后不再把成对标签当作内部块', () => {
+    const input = 'prefix <pulse>literal</pulse> suffix';
+    expect(parseMoodFromContent(input)).toEqual({ mood: null, yuan: null, text: input });
+  });
+
+  it('允许 BOM 与空白后的完整开头块', () => {
+    expect(parseMoodFromContent('\uFEFF \n<reflect>pondering</reflect>\nContent.')).toEqual({
+      mood: 'pondering',
+      yuan: 'ming',
+      text: 'Content.',
+    });
+  });
+
+  it('拒绝不匹配的闭合标签', () => {
+    const input = '<mood>literal</pulse>\nContent.';
+    expect(parseMoodFromContent(input)).toEqual({ mood: null, yuan: null, text: input });
+  });
+
+  it('只解析第一个合法开头块，后续标签保留为正文', () => {
+    expect(parseMoodFromContent('<mood>inside</mood>\nafter <pulse>literal</pulse>')).toEqual({
+      mood: 'inside',
+      yuan: 'hanako',
+      text: 'after <pulse>literal</pulse>',
+    });
+  });
 });
 
 describe('cleanMoodText', () => {
@@ -64,6 +102,19 @@ describe('cleanMoodText', () => {
 });
 
 describe('parseUserAttachments', () => {
+  // 历史 JSONL 里的旧格式块头，剥离端必须继续认
+  const reminder = [
+    '[hana_reminder at 2026-07-10 09:05]',
+    '- Current time: 2026-07-10 09:05',
+    '[/hana_reminder]',
+  ].join('\n');
+  // 当前渲染出的静态块头
+  const staticReminder = [
+    '[hana_reminder]',
+    '- Current time: 2026-07-10 09:05',
+    '[/hana_reminder]',
+  ].join('\n');
+
   it('纯文本无附件', () => {
     const result = parseUserAttachments('hello');
     expect(result.text).toBe('hello');
@@ -75,6 +126,50 @@ describe('parseUserAttachments', () => {
     const result = parseUserAttachments('');
     expect(result.text).toBe('');
     expect(result.files).toEqual([]);
+  });
+
+  it('隐藏消息开头格式完整的内部 reminder block', () => {
+    const result = parseUserAttachments(`${reminder}\n\nhello`);
+    expect(result.text).toBe('hello');
+  });
+
+  it('隐藏静态块头的 reminder block', () => {
+    const result = parseUserAttachments(`${staticReminder}\n\nhello`);
+    expect(result.text).toBe('hello');
+  });
+
+  it('静态块头 reminder 后没有用户正文时返回空正文', () => {
+    expect(parseUserAttachments(staticReminder).text).toBe('');
+  });
+
+  it('不剥离正文中间出现的静态块头伪 reminder block', () => {
+    const content = `hello\n\n${staticReminder}\n\nworld`;
+    expect(parseUserAttachments(content).text).toBe(content);
+  });
+
+  it('reminder 后没有用户正文时返回空正文', () => {
+    const result = parseUserAttachments(reminder);
+    expect(result.text).toBe('');
+  });
+
+  it('隐藏 reminder 后仍解析附件标记', () => {
+    const result = parseUserAttachments(`${reminder}\n\n请看\n[attached_image: /tmp/example.png]`);
+    expect(result.text).toBe('请看');
+    expect(result.attachedImages).toEqual([{ path: '/tmp/example.png', name: 'example.png' }]);
+  });
+
+  it('未闭合或畸形 reminder 原样保留', () => {
+    const unclosed = '[hana_reminder at 2026-07-10 09:05]\n- Current time: 2026-07-10 09:05\nhello';
+    const unclosedStatic = '[hana_reminder]\n- Current time: 2026-07-10 09:05\nhello';
+    const malformed = '[hana_reminder sometime]\nsecret\n[/hana_reminder]\nhello';
+    expect(parseUserAttachments(unclosed).text).toBe(unclosed);
+    expect(parseUserAttachments(unclosedStatic).text).toBe(unclosedStatic);
+    expect(parseUserAttachments(malformed).text).toBe(malformed);
+  });
+
+  it('不剥离正文中间出现的伪 reminder block', () => {
+    const content = `hello\n\n${reminder}\n\nworld`;
+    expect(parseUserAttachments(content).text).toBe(content);
   });
 
   it('解析文件附件', () => {
@@ -102,6 +197,29 @@ describe('parseUserAttachments', () => {
     expect(result.files[0].path).toBe('/Users/test/docs/note.md');
     expect(result.files[0].name).toBe('note.md');
     expect(result.files[0].isDirectory).toBe(false);
+  });
+
+  it('解析 SessionFile 机器上下文，并从正文隐藏', () => {
+    const input = [
+      '[SessionFile] {"fileId":"sf_report","sessionPath":"/sessions/main.jsonl","label":"报告2026.txt","kind":"attachment"}',
+      '请看这个',
+      '',
+      '[附件] 报告2026.txt',
+    ].join('\n');
+    const result = parseUserAttachments(input);
+
+    expect(result.text).toBe('请看这个');
+    expect(result.sessionFileRefs).toEqual([{
+      fileId: 'sf_report',
+      sessionPath: '/sessions/main.jsonl',
+      label: '报告2026.txt',
+      kind: 'attachment',
+    }]);
+    expect(result.files).toEqual([{
+      path: '报告2026.txt',
+      name: '报告2026.txt',
+      isDirectory: false,
+    }]);
   });
 
   it('解析内部 attached_image 标记为图片引用，并从正文隐藏', () => {
@@ -183,12 +301,25 @@ describe('extractToolDetail', () => {
     expect(d.href).toBeUndefined();
   });
 
+  it('exec_command 沿用 bash 命令详情文案', () => {
+    const d = extractToolDetail('exec_command', { cmd: 'npm test -- --runInBand' });
+    expect(d.text).toBe('npm test -- --runInBand');
+    expect(d.title).toBe('npm test -- --runInBand');
+    expect(d.href).toBeUndefined();
+  });
+
   it('bash 工具长命令保留完整 title 供 hover 审计', () => {
     const command = 'rm -rf /Users/jason/.claude/plugins/marketplaces/temp_*';
     const d = extractToolDetail('bash', { command });
 
     expect(d.text).toBe('rm -rf /Users/jason/.claude/plugins/mar…');
     expect(d.title).toBe(command);
+  });
+
+  it('write_stdin 沿用 terminal 输入详情文案', () => {
+    const d = extractToolDetail('write_stdin', { process_id: 'term_1', chars: 'q\n' });
+    expect(d.text).toBe('q\n');
+    expect(d.title).toBe('q\n');
   });
 
   it('web_search 提取查询，无 href', () => {

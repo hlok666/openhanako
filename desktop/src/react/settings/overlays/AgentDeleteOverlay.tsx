@@ -1,19 +1,24 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { useShallow } from 'zustand/react/shallow';
 import { useSettingsStore } from '../store';
 import { hanaFetch } from '../api';
 import { t } from '../helpers';
-import { switchToAgent, loadSettingsConfig, loadAgents } from '../actions';
+import { loadSettingsConfig, loadAgents } from '../actions';
+import { Overlay } from '../../ui';
 import styles from '../Settings.module.css';
 
 export function AgentDeleteOverlay() {
-  const { agents, currentAgentId, showToast } = useSettingsStore();
+  const { agents, currentAgentId, settingsAgentId } = useSettingsStore(
+    useShallow(s => ({ agents: s.agents, currentAgentId: s.currentAgentId, settingsAgentId: s.settingsAgentId }))
+  );
+  const showToast = useSettingsStore(s => s.showToast);
   const [visible, setVisible] = useState(false);
   const [step, setStep] = useState<1 | 2>(1);
   const [nameInput, setNameInput] = useState('');
   const [deleteTargetId, setDeleteTargetId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
-
-  const settingsAgentId = useSettingsStore(s => s.settingsAgentId);
   const targetId = deleteTargetId || settingsAgentId || currentAgentId;
   const target = agents.find(a => a.id === targetId);
 
@@ -25,6 +30,7 @@ export function AgentDeleteOverlay() {
       setDeleteTargetId(agentId);
       setStep(1);
       setNameInput('');
+      setError('');
       setVisible(true);
     };
     window.addEventListener('hana-show-agent-delete', handler);
@@ -35,19 +41,18 @@ export function AgentDeleteOverlay() {
     if (step === 2) requestAnimationFrame(() => inputRef.current?.focus());
   }, [step]);
 
-  const close = () => {
+  const close = useCallback(() => {
     setVisible(false);
     setDeleteTargetId(null);
-  };
+    setDeleting(false);
+    setError('');
+  }, []);
 
   const confirmDelete = async () => {
-    if (!target || nameInput.trim() !== target.name) return;
+    if (!target || nameInput.trim() !== target.name || deleting) return;
+    setDeleting(true);
+    setError('');
     try {
-      if (targetId === currentAgentId) {
-        const other = agents.find(a => a.id !== targetId);
-        if (!other) throw new Error(t('settings.agent.lastAgent'));
-        await switchToAgent(other.id);
-      }
       const res = await hanaFetch(`/api/agents/${targetId}`, { method: 'DELETE' });
       const data = await res.json();
       if (data.error) throw new Error(data.error);
@@ -57,15 +62,26 @@ export function AgentDeleteOverlay() {
       await loadAgents();
       await loadSettingsConfig();
     } catch (err: any) {
-      showToast(t('settings.agent.deleteFailed') + ': ' + err.message, 'error');
+      const message = t('settings.agent.deleteFailed') + ': ' + err.message;
+      setError(message);
+      showToast(message, 'error');
+    } finally {
+      setDeleting(false);
     }
   };
 
-  if (!visible || !target) return null;
+  if (!target) return null;
 
   return (
-    <div className={`${styles['agent-delete-overlay']} ${styles['visible']}`} onClick={(e) => { if (e.target === e.currentTarget) close(); }}>
-      <div className={styles['agent-delete-card']}>
+    <Overlay
+      scope="inline"
+      open={visible}
+      onClose={close}
+      backdrop="blur"
+      zIndex={110}
+      className={styles['agent-delete-card']}
+      disableContainerAnimation
+    >
         {step === 1 ? (
           <div className={styles['agent-delete-step']}>
             <h3 className={styles['agent-delete-title']}>{t('settings.agent.deleteTitle1', { name: target.name })}</h3>
@@ -86,18 +102,22 @@ export function AgentDeleteOverlay() {
                 placeholder={t('settings.agent.deletePlaceholder')}
                 autoComplete="off"
                 value={nameInput}
-                onChange={(e) => setNameInput(e.target.value)}
+                disabled={deleting}
+                onChange={(e) => {
+                  setNameInput(e.target.value);
+                  setError('');
+                }}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') { e.preventDefault(); confirmDelete(); }
-                  if (e.key === 'Escape') close();
                 }}
               />
             </div>
+            {error && <div className={styles['settings-inline-error']} role="alert">{error}</div>}
             <div className={styles['agent-delete-actions']}>
-              <button className={styles['agent-delete-cancel']} onClick={close}>{t('settings.agent.deleteCancel')}</button>
+              <button className={styles['agent-delete-cancel']} onClick={close} disabled={deleting}>{t('settings.agent.deleteCancel')}</button>
               <button
                 className={styles['agent-delete-danger']}
-                disabled={nameInput.trim() !== target.name}
+                disabled={deleting || nameInput.trim() !== target.name}
                 onClick={confirmDelete}
               >
                 {t('settings.agent.deleteConfirm')}
@@ -105,7 +125,6 @@ export function AgentDeleteOverlay() {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </Overlay>
   );
 }

@@ -3,8 +3,9 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import fs from 'node:fs';
 import path from 'node:path';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import React from 'react';
+import { installWindowTestT } from '../helpers/i18n-test-strings';
 import { InputArea } from '../../components/InputArea';
 import { AssistantMessage } from '../../components/chat/AssistantMessage';
 import { SessionConfirmationPrompt } from '../../components/input/SessionConfirmationPrompt';
@@ -39,6 +40,8 @@ vi.mock('@tiptap/react', () => ({
     }),
     getText: () => '',
     getJSON: () => ({ type: 'doc', content: [] }),
+    state: { tr: { setMeta: vi.fn(() => ({})) } },
+    view: { dispatch: vi.fn() },
     on: vi.fn(),
     off: vi.fn(),
   }),
@@ -57,8 +60,12 @@ vi.mock('../../components/input/extensions/skill-badge', () => ({
   SkillBadge: {},
 }));
 
+import { createTestTranslator } from '../helpers/i18n-test-strings';
+
+const testT = createTestTranslator();
+
 vi.mock('../../hooks/use-i18n', () => ({
-  useI18n: () => ({ t: (key: string) => key }),
+  useI18n: () => ({ t: testT }),
 }));
 
 vi.mock('../../hooks/use-config', () => ({
@@ -105,6 +112,7 @@ vi.mock('../../components/input/InputControlBar', () => ({
 
 vi.mock('../../hooks/use-slash-items', () => ({
   useSkillSlashItems: () => [],
+  useServerSlashCommandItems: () => [],
 }));
 
 vi.mock('../../utils/paste-upload-feedback', () => ({
@@ -127,6 +135,8 @@ function seedSession() {
     inlineErrors: {},
     attachedFiles: [],
     docContextAttached: false,
+    quoteCandidate: null,
+    quotedSelections: [],
     quotedSelection: null,
     models: [],
     previewItems: [],
@@ -159,9 +169,13 @@ function seedSession() {
 }
 
 describe('computer app approval prompt', () => {
-  beforeEach(() => {
+  afterEach(() => {
     cleanup();
+  });
+
+  beforeEach(() => {
     vi.clearAllMocks();
+    installWindowTestT();
     seedSession();
   });
 
@@ -179,6 +193,40 @@ describe('computer app approval prompt', () => {
         body: JSON.stringify({ action: 'confirmed' }),
       }));
     });
+  });
+
+  it('shows a pending input confirmation that arrived while its session was inactive and not hydrated', () => {
+    const block = {
+      type: 'session_confirmation',
+      confirmId: 'confirm-inactive-1',
+      kind: 'computer_app_approval',
+      surface: 'input',
+      status: 'pending',
+      title: '允许 Hana 使用电脑',
+      body: 'Hana 想控制这个应用来继续当前任务。',
+      subject: { label: 'Mock Notes', detail: 'mock · app.notes' },
+      severity: 'elevated',
+      actions: { confirmLabel: '同意', rejectLabel: '拒绝' },
+      payload: { approval: { providerId: 'mock', appId: 'app.notes' } },
+    };
+    useStore.setState({
+      currentSessionPath: '/session/b.jsonl',
+      sessions: [],
+      chatSessions: {
+        '/session/b.jsonl': { items: [], hasMore: false, loadingMore: false, oldestId: undefined, revision: null },
+      },
+    } as never);
+
+    handleServerMessage({
+      type: 'content_block',
+      sessionPath: '/session/a.jsonl',
+      block,
+    });
+    useStore.setState({ currentSessionPath: '/session/a.jsonl' } as never);
+
+    render(React.createElement(InputArea));
+
+    expect(screen.getByText('是否允许 Hana 控制 Mock Notes')).toBeTruthy();
   });
 
   it('re-enables approval actions when a new pending confirmation replaces the submitted one', async () => {
@@ -251,17 +299,21 @@ describe('computer app approval prompt', () => {
       fireEvent.click(screen.getByRole('button', { name: '更多确认选项' }));
       fireEvent.click(screen.getByRole('menuitem', { name: '本对话不再询问' }));
 
+      // A tool approval also reads the MCP connector registry, to find out
+      // whether it is about an MCP tool. Match the calls that matter by path
+      // rather than by position, so that lookup does not shift the assertions.
+      const callFor = (path: string) => hanaFetchMock.mock.calls.find(call => call[0] === path);
       await waitFor(() => {
-        expect(hanaFetchMock).toHaveBeenCalledTimes(2);
+        expect(callFor('/api/confirm/confirm-tool-1')).toBeTruthy();
       });
-      expect(hanaFetchMock.mock.calls[0]).toEqual([
+      expect(callFor('/api/session-permission-mode')).toEqual([
         '/api/session-permission-mode',
         expect.objectContaining({
           method: 'POST',
           body: JSON.stringify({ mode: 'operate', currentSessionOnly: true }),
         }),
       ]);
-      expect(hanaFetchMock.mock.calls[1]).toEqual([
+      expect(callFor('/api/confirm/confirm-tool-1')).toEqual([
         '/api/confirm/confirm-tool-1',
         expect.objectContaining({
           method: 'POST',
@@ -298,6 +350,32 @@ describe('computer app approval prompt', () => {
     expect(menuItem.closest('[role="menu"]')).toBeTruthy();
   });
 
+  it('shows full tool action parameters in a tooltip outside the clipped confirmation card', async () => {
+    const longCommand = 'python scripts/generate_report.py --workspace "/very/long/path/with spaces/project" --write-output --explain-every-step';
+    const block = {
+      type: 'session_confirmation',
+      confirmId: 'confirm-tool-tooltip',
+      kind: 'tool_action_approval',
+      surface: 'input',
+      status: 'pending',
+      title: '允许 Hana 执行这次操作',
+      body: '当前会话处于先问模式，这次操作会改变本地或外部状态。',
+      subject: { label: 'bash', detail: 'command: python scripts/generate_report.py --workspace "/very/long/path/with spaces/project"' },
+      severity: 'elevated',
+      actions: { confirmLabel: '同意', rejectLabel: '拒绝' },
+      payload: { toolName: 'bash', params: { command: longCommand, timeout: 120000 } },
+    } as const;
+
+    render(React.createElement(SessionConfirmationPrompt, { block }));
+
+    fireEvent.mouseEnter(screen.getByTestId('session-confirmation-summary'));
+
+    const tooltip = await screen.findByRole('tooltip');
+    expect(tooltip.textContent).toContain(longCommand);
+    expect(tooltip.textContent).toContain('"timeout": 120000');
+    expect(tooltip.closest('[data-confirm-id="confirm-tool-tooltip"]')).toBeNull();
+  });
+
   it('does not offer ask-mode bypass on computer app approval prompts', () => {
     const block = {
       type: 'session_confirmation',
@@ -317,7 +395,7 @@ describe('computer app approval prompt', () => {
     expect(screen.queryByRole('button', { name: '更多确认选项' })).toBeNull();
   });
 
-  it('keeps the input confirmation as a short card sliding from behind the input box', () => {
+  it('keeps the input confirmation as a same-width card sliding from behind the input box', () => {
     const css = fs.readFileSync(
       path.join(process.cwd(), 'desktop/src/react/components/input/InputArea.module.css'),
       'utf8',
@@ -332,10 +410,12 @@ describe('computer app approval prompt', () => {
 
     expect(inputSource).toContain("styles['input-stack']");
     expect(stackBlock).toMatch(/width:\s*100%/);
-    expect(promptBlock).toMatch(/width:\s*calc\(100%\s*-\s*4rem\)/);
+    expect(promptBlock).toMatch(/width:\s*100%/);
+    expect(promptBlock).toMatch(/max-width:\s*100%/);
     expect(promptBlock).toMatch(/background:\s*var\(--bg-card\)/);
-    expect(promptBlock).toMatch(/border-radius:\s*var\(--radius-lg\)/);
-    expect(promptBlock).toMatch(/margin:\s*0 auto -2rem/);
+    expect(promptBlock).toMatch(/border-radius:\s*var\(--radius-chat-card\)/);
+    expect(promptBlock).toMatch(/margin:\s*0 0 -2rem/);
+    expect(promptBlock).toMatch(/padding:\s*1rem 1rem 2\.24rem/);
     expect(promptBlock).not.toContain('color-mix');
     expect(promptBlock).not.toContain('border-bottom-color: transparent');
     expect(inputWrapperBlock).toMatch(/position:\s*relative/);
@@ -413,6 +493,9 @@ describe('computer app approval prompt', () => {
       },
       showAvatar: false,
       sessionPath: '/session/a.jsonl',
+      agentDisplay: { id: 'hana', displayName: 'Hana', avatarUrl: null, fallbackAvatar: null, yuan: 'hana', isUser: false },
+      isStreaming: false,
+      isSelected: false,
     }));
 
     expect(screen.queryByText('允许 Hana 使用电脑')).toBeNull();

@@ -1,7 +1,7 @@
 /**
  * todo-constants.ts — 前端镜像
  *
- * 后端真实来源：project-hana/lib/tools/todo-constants.js
+ * 后端真实来源：lib/tools/todo-constants.ts
  * 这两个文件必须保持同步。任何改动都要改两处。
  *
  * 命名不对称说明：tool 名用 snake_case（todo_write），对齐 SDK built-in
@@ -16,3 +16,6 @@ export const TODO_WRITE_TOOL_NAME = "todo_write" as const;
 export const TODO_TOOL_NAMES = ["todo", TODO_WRITE_TOOL_NAME] as const;
 
 export type TodoToolName = typeof TODO_TOOL_NAMES[number];
+
+/** Hana 内部 session 事件：用户手动完成并移除当前 todo group */
+export const TODO_STATE_CUSTOM_TYPE = "hana.todo_state" as const;

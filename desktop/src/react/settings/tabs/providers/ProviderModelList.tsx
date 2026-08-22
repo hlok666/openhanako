@@ -12,7 +12,113 @@ interface DiscoveredModel {
   id: string;
   name?: string;
   context?: number | null;
+  contextWindow?: number | null;
   maxOutput?: number | null;
+  maxTokens?: number | null;
+  maxOutputTokens?: number | null;
+  image?: boolean;
+  vision?: boolean;
+  video?: boolean;
+  audio?: boolean;
+  reasoning?: boolean;
+  xhigh?: boolean;
+  type?: string;
+  defaultThinkingLevel?: string;
+  thinkingLevels?: string[];
+  compat?: Record<string, unknown>;
+  toolUse?: Record<string, unknown>;
+  visionCapabilities?: Record<string, unknown>;
+}
+
+type CapabilityKind = 'image' | 'video' | 'audio' | 'reasoning';
+type ProviderModelEntry = string | { id: string; [key: string]: unknown };
+
+function modelIdOf(model: ProviderModelEntry): string {
+  return typeof model === 'object' ? model.id : model;
+}
+
+function numberFromMeta(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function boolFromMeta(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function plainObjectFromMeta(value: unknown): Record<string, unknown> | undefined {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+function compactDiscoveredModelEntry(model: DiscoveredModel): ProviderModelEntry {
+  const id = model.id.trim();
+  if (!id) return model.id;
+
+  const entry: Record<string, unknown> = { id };
+  const name = typeof model.name === 'string' ? model.name.trim() : '';
+  if (name && name !== id) entry.name = name;
+
+  const context = numberFromMeta(model.context) ?? numberFromMeta(model.contextWindow);
+  if (context !== undefined) entry.context = context;
+
+  const maxOutput = numberFromMeta(model.maxOutput)
+    ?? numberFromMeta(model.maxTokens)
+    ?? numberFromMeta(model.maxOutputTokens);
+  if (maxOutput !== undefined) entry.maxOutput = maxOutput;
+
+  const image = boolFromMeta(model.image ?? model.vision);
+  if (image !== undefined) entry.image = image;
+  for (const key of ['video', 'audio', 'reasoning', 'xhigh'] as const) {
+    const value = boolFromMeta(model[key]);
+    if (value !== undefined) entry[key] = value;
+  }
+
+  if (typeof model.type === 'string' && model.type.trim()) entry.type = model.type.trim();
+  if (typeof model.defaultThinkingLevel === 'string' && model.defaultThinkingLevel.trim()) {
+    entry.defaultThinkingLevel = model.defaultThinkingLevel.trim();
+  }
+  if (Array.isArray(model.thinkingLevels)) entry.thinkingLevels = [...model.thinkingLevels];
+  for (const key of ['compat', 'toolUse', 'visionCapabilities'] as const) {
+    const value = plainObjectFromMeta(model[key]);
+    if (value) entry[key] = value;
+  }
+
+  return Object.keys(entry).length === 1 ? id : entry as ProviderModelEntry;
+}
+
+function CapabilityIcon({ kind }: { kind: CapabilityKind }) {
+  const label = t(`settings.api.capability.${kind}`);
+  return (
+    <span className={styles['pv-capability-icon']} title={label} aria-label={label}>
+      {kind === 'image' ? (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <path d="M21 15l-5-5L5 21" />
+        </svg>
+      ) : kind === 'video' ? (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <rect x="3" y="5" width="13" height="14" rx="2" />
+          <path d="m16 9 5-3v12l-5-3" />
+        </svg>
+      ) : kind === 'audio' ? (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M4 10v4" />
+          <path d="M8 7v10" />
+          <path d="M12 4v16" />
+          <path d="M16 8v8" />
+          <path d="M20 11v2" />
+        </svg>
+      ) : (
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+          <path d="M9 18h6" />
+          <path d="M10 22h4" />
+          <path d="M12 2a7 7 0 0 0-4 12.74V16a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1v-1.26A7 7 0 0 0 12 2Z" />
+        </svg>
+      )}
+    </span>
+  );
 }
 
 export function ProviderModelList({ providerId, summary, onRefresh }: {
@@ -20,7 +126,7 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
   summary: ProviderSummary;
   onRefresh: () => Promise<void>;
 }) {
-  const { showToast } = useSettingsStore();
+  const showToast = useSettingsStore(s => s.showToast);
   const [search, setSearch] = useState('');
   const [customInput, setCustomInput] = useState('');
   const [discoveredModels, setDiscoveredModels] = useState<DiscoveredModel[]>([]);
@@ -38,9 +144,7 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
   useEffect(() => { loadDiscoveredModels(); }, [providerId]);
 
   const rawModels = summary.models || [];
-  /** 从混合数组条目提取 model ID */
-  const modelId = (m: any): string => typeof m === 'object' ? m.id : m;
-  const currentModelIds = rawModels.map(modelId);
+  const currentModelIds = rawModels.map(modelIdOf);
   // Merge: discovered model IDs + custom_models, deduplicated, with currentModelIds included for display
   const discoveredIds = discoveredModels.map(m => m.id);
   const allModels = [...new Set([...currentModelIds, ...discoveredIds, ...(summary.custom_models || [])])];
@@ -50,10 +154,12 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
   const addModelToProvider = async (mid: string) => {
     if (currentModelIds.includes(mid)) return;
     try {
+      const discovered = discoveredModels.find(model => model.id === mid);
+      const nextEntry = discovered ? compactDiscoveredModelEntry(discovered) : mid;
       await hanaFetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providers: { [providerId]: { models: [...rawModels, mid] } } }),
+        body: JSON.stringify({ providers: { [providerId]: { models: [...rawModels, nextEntry] } } }),
       });
       invalidateConfigCache();
       await onRefresh();
@@ -65,7 +171,7 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
 
   const removeModelFromProvider = async (mid: string) => {
     try {
-      const next = rawModels.filter((m: any) => (typeof m === 'object' ? m.id : m) !== mid);
+      const next = rawModels.filter((m: ProviderModelEntry) => modelIdOf(m) !== mid);
       await hanaFetch('/api/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -82,23 +188,17 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
   const addCustomModel = async () => {
     const id = customInput.trim();
     if (!id) return;
+    if (currentModelIds.includes(id)) {
+      setCustomInput('');
+      return;
+    }
     try {
-      if (summary.supports_oauth) {
-        const res = await hanaFetch(`/api/auth/oauth/${providerId}/custom-models`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ modelId: id }),
-        });
-        const data = await res.json();
-        if (data.error) throw new Error(data.error);
-      } else {
-        await hanaFetch('/api/config', {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ providers: { [providerId]: { models: [...rawModels, id] } } }),
-        });
-        invalidateConfigCache();
-      }
+      await hanaFetch('/api/config', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ providers: { [providerId]: { models: [...rawModels, id] } } }),
+      });
+      invalidateConfigCache();
       setCustomInput('');
       await onRefresh();
     } catch (err: unknown) {
@@ -130,6 +230,8 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
       if (models.length === 0) { showFetchHint(t('settings.providers.fetchFailed'), false); return; }
       // Backend already cached the results; just refresh the dropdown
       setDiscoveredModels(models);
+      setSearch('');
+      setDropdownOpen(true);
       showFetchHint(t('settings.providers.fetchSuccess', { name: providerId, n: models.length }), true);
     } catch {
       showFetchHint(t('settings.providers.fetchFailed'), false);
@@ -151,6 +253,12 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
   });
 
   const [editing, setEditing] = useState<{ id: string; anchor: HTMLElement } | null>(null);
+  const editingRawEntry = editing
+    ? rawModels.find((model: ProviderModelEntry) => modelIdOf(model) === editing.id)
+    : null;
+  const editingModelMeta = editingRawEntry && typeof editingRawEntry === 'object'
+    ? editingRawEntry
+    : undefined;
 
   return (
     <div className={styles['pv-models']}>
@@ -163,12 +271,25 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
           </div>
           <div className={styles['pv-fav-list']}>
             {currentModelIds.map(mid => {
-              const meta = lookupModelMeta(mid, providerId) || {};
+              const rawEntry = rawModels.find((m: ProviderModelEntry) => modelIdOf(m) === mid);
+              const entryMeta: Record<string, unknown> = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
+              const knownMeta: Record<string, any> = lookupModelMeta(mid, providerId) || {};
+              const meta = { ...knownMeta, ...entryMeta };
+              const modelContext = numberFromMeta(entryMeta.context)
+                ?? numberFromMeta(entryMeta.contextWindow)
+                ?? numberFromMeta(knownMeta.context)
+                ?? numberFromMeta(knownMeta.contextWindow);
+              const displayName = meta.displayName || meta.name || mid;
+              const showModelId = displayName !== mid;
               return (
                 <div key={mid} className={styles['pv-fav-item']}>
-                  <span className={styles['pv-fav-item-name']} title={mid}>{meta.displayName || meta.name || mid}</span>
-                  {(meta.displayName || meta.name) && meta.displayName !== mid && meta.name !== mid && <span className={styles['pv-fav-item-id']}>{mid}</span>}
-                  {meta.context && <span className={styles['pv-model-ctx']}>{formatContext(meta.context)}</span>}
+                  <span className={styles['pv-fav-item-name']} title={String(displayName)}>{displayName}</span>
+                  {showModelId && <span className={styles['pv-fav-item-id']} title={mid}>{mid}</span>}
+                  {meta.image === true && <CapabilityIcon kind="image" />}
+                  {meta.video === true && <CapabilityIcon kind="video" />}
+                  {meta.audio === true && <CapabilityIcon kind="audio" />}
+                  {meta.reasoning === true && <CapabilityIcon kind="reasoning" />}
+                  {modelContext !== undefined && <span className={styles['pv-model-ctx']}>{formatContext(modelContext)}</span>}
                   <div className={styles['pv-fav-item-actions']}>
                     <button
                       className={styles['pv-fav-item-edit']}
@@ -191,7 +312,14 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
             })}
           </div>
           {editing && (
-            <ModelEditPanel modelId={editing.id} providerId={providerId} anchorEl={editing.anchor} onClose={() => setEditing(null)} onRefresh={onRefresh} />
+            <ModelEditPanel
+              modelId={editing.id}
+              providerId={providerId}
+              modelMeta={editingModelMeta}
+              anchorEl={editing.anchor}
+              onClose={() => setEditing(null)}
+              onRefresh={onRefresh}
+            />
           )}
         </div>
       )}
@@ -235,9 +363,16 @@ export function ProviderModelList({ providerId, summary, onRefresh }: {
             <div className={styles['pv-model-dropdown-list']}>
               {filtered.map(mid => {
                 const isAdded = currentModelIds.includes(mid);
-                const meta = lookupModelMeta(mid, providerId) || {};
+                const meta: Record<string, any> = lookupModelMeta(mid, providerId) || {};
+                const rawEntry = rawModels.find((model: ProviderModelEntry) => modelIdOf(model) === mid);
+                const userMeta: Record<string, unknown> = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
                 const discovered = discoveredModels.find(d => d.id === mid);
-                const ctx = meta.context || discovered?.context;
+                const ctx = numberFromMeta(userMeta.context)
+                  ?? numberFromMeta(userMeta.contextWindow)
+                  ?? numberFromMeta(meta.context)
+                  ?? numberFromMeta(meta.contextWindow)
+                  ?? numberFromMeta(discovered?.context)
+                  ?? numberFromMeta(discovered?.contextWindow);
                 return (
                   <button
                     key={mid}

@@ -13,6 +13,9 @@
     --accent:       #C99AAF;
     --accent-hover: #D8AFC0;
     --accent-light: rgba(201, 154, 175, 0.11);
+    --link:         #B9E2FF;
+    --link-hover:   #D7F0FF;
+    --link-rgb:     185, 226, 255;
 
     /* 文字 */
     --text:         #E1EAF0;
@@ -41,7 +44,7 @@
     --mood-bg:      rgba(234, 178, 160, 0.08);
     --mood-text:    #EAB2A0;
     --mood-border:  rgba(234, 178, 160, 0.20);
-    --tool-bg:      rgba(67, 91, 102, 0.20);
+    --tool-bg:      rgba(255, 255, 255, 0.03);
     --tool-text:    #B7C5CE;
     --user-bg:      rgba(170, 121, 141, 0.10);
     --drop-overlay-bg: rgba(59, 74, 84, 0.85);
